@@ -3,7 +3,8 @@ __pycache__/
 *.pyc
 history.db
 meter.json
-auth.json          # 含本地 API 令牌, 切勿提交
+# 含本地 API 令牌, 切勿提交
+auth.json
 *.log
 *.pid
 nul
