@@ -1,0 +1,20 @@
+# ---- 运行时生成的数据 ----
+__pycache__/
+*.pyc
+history.db
+meter.json
+auth.json          # 含本地 API 令牌, 切勿提交
+*.log
+*.pid
+nul
+server_err.log
+monitor.pid
+
+# ---- 本地依赖目录 (按项目安装, 不入库) ----
+pylibs/
+
+# ---- 项目内部数据 (记忆/缓存) ----
+.workbuddy/
+
+# ---- 临时探测产物 ----
+lhm_probe.txt

@@ -1,0 +1,5 @@
+# GPU Monitor 运行依赖
+# 安装: pip install -r requirements.txt
+# 说明: pynvml 在 PyPI 上的官方包名为 nvidia-ml-py (导入名仍为 pynvml)
+nvidia-ml-py>=11.495.0
+psutil>=5.9.0
