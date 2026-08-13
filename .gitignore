@@ -19,3 +19,17 @@ pylibs/
 
 # ---- 临时探测产物 ----
 lhm_probe.txt
+
+# ---- 第三方二进制 (运行时由 install_lhm.bat 下载, 不入库) ----
+LibreHardwareMonitor/
+
+# ---- 守护进程运行时状态 ----
+watchdog.lock
+*.lock
+
+# ---- Python 标准忽略 ----
+*.egg-info/
+build/
+dist/
+.venv/
+venv/

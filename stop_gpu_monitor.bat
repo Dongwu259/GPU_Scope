@@ -1,17 +1,29 @@
 @echo off
 REM ============================================================
-REM  GPU 实时监测面板 - 停止 (优雅退出, 落盘计量数据)
+REM  GPU real-time monitor - STOP (graceful shutdown, flushes meter)
+REM  Signals the watchdog to exit (via stop.flag) and shuts down the
+REM  main service. The watchdog will NOT restart it after a stop.
 REM ============================================================
 setlocal
 cd /d C:\Users\admin\WorkBuddy\GPUmonitor
+set "HOST=127.0.0.1"
+set "PORT=8080"
 
-echo [GPU Monitor] 正在停止 (优雅退出)...
-curl -s -m 5 -X POST http://localhost:8080/api/shutdown >nul 2>nul
-timeout /t 2 >nul
+echo [GPU Monitor] Stopping (graceful shutdown)...
 
-REM 兜底: 若端口仍被占用, 按端口强制结束进程
-for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":8080" ^| findstr "LISTENING"') do (
+REM 1) Tell the watchdog to exit (so it won't auto-restart the service)
+echo 1 > stop.flag
+
+REM 2) Ask the main service to shut down gracefully
+curl -s -m 5 -X POST http://%HOST%:%PORT%/api/shutdown >nul 2>nul
+
+REM 3) Wait for the watchdog to react (one full check interval + margin)
+timeout /t 18 >nul
+
+REM 4) Fallback: if the port is still occupied, force-kill by port
+for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":%PORT%" ^| findstr "LISTENING"') do (
   taskkill /F /PID %%a 2>nul
 )
-echo [GPU Monitor] 已停止。
+
+echo [GPU Monitor] Stopped.
 endlocal

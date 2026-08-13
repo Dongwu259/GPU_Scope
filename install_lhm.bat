@@ -2,36 +2,36 @@
 setlocal
 cd /d "%~dp0"
 echo ============================================================
-echo  ä¸‹è½½ LibreHardwareMonitor (LHM)
-echo  ç”¨äºè¯»å– Windows ä¸æš´éœ²çš„ CPU çœŸå®æ¸©åº¦ / å°è£…åŠŸç‡ / å†…å­˜æ¸©åº¦
+echo  ÏÂÔØ LibreHardwareMonitor (LHM)
+echo  ÓÃÓÚ¶ÁÈ¡ Windows ²»±©Â¶µÄ CPU ÕæÊµÎÂ¶È / ·â×°¹¦ÂÊ / ÄÚ´æÎÂ¶È
 echo ============================================================
 echo.
-powershell -NoProfile -Command ^
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$ErrorActionPreference='Stop';" ^
   "$api='https://api.github.com/repos/LibreHardwareMonitor/LibreHardwareMonitor/releases/latest';" ^
   "$rel=Invoke-RestMethod -Uri $api -Headers @{'User-Agent'='gpu-monitor'};" ^
   "$asset=$rel.assets | Where-Object { $_.name -like 'LibreHardwareMonitor*.zip' } | Select-Object -First 1;" ^
-  "if(-not $asset){ throw 'æœªæ‰¾åˆ°å‘å¸ƒèµ„äº§' };" ^
-  "Write-Host ('ä¸‹è½½: '+$asset.browser_download_url);" ^
+  "if(-not $asset){ throw 'asset not found' };" ^
+  "Write-Host ('Downloading: '+$asset.browser_download_url);" ^
   "Invoke-WebRequest -Uri $asset.browser_download_url -OutFile 'lhm.zip' -Headers @{'User-Agent'='gpu-monitor'};" ^
   "Expand-Archive -Path 'lhm.zip' -DestinationPath 'LibreHardwareMonitor' -Force;" ^
   "Remove-Item 'lhm.zip' -Force;" ^
-  "Write-Host 'ä¸‹è½½å¹¶è§£å‹å®Œæˆã€‚'"
+  "Write-Host 'Download and extraction complete.'"
 if errorlevel 1 (
   echo.
-  echo [é”™è¯¯] ä¸‹è½½å¤±è´¥ã€‚è¯·æ‰‹åŠ¨å‰å¾€ä»¥ä¸‹åœ°å€ä¸‹è½½å¹¶è§£å‹ï¼š
+  echo [´íÎó] ÏÂÔØÊ§°Ü¡£ÇëÊÖ¶¯Ç°ÍùÒÔÏÂµØÖ·ÏÂÔØ²¢½âÑ¹£º
   echo   https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases
   pause
   exit /b 1
 )
 echo.
 echo ============================================================
-echo  ä¸‹è½½å®Œæˆï¼è¯·æŒ‰ä»¥ä¸‹æ­¥éª¤å¯ç”¨çœŸå®æ¸©åº¦ / åŠŸç‡ï¼š
-echo   1) ä»¥ã€ç®¡ç†å‘˜èº«ä»½ã€‘è¿è¡Œ  LibreHardwareMonitor\LibreHardwareMonitor.exe
-echo   2) èœå• â€œé€‰é¡¹(Options)â€ ä¸­å‹¾é€‰ï¼š
-echo        - å¯ç”¨ WMI (Enable WMI)
-echo        - è¿è¡Œ Web æœåŠ¡å™¨ (Run Web server on localhost:8085)
-echo   3) é‡æ–°æ‰“å¼€ç›‘æµ‹é¢æ¿ï¼ŒCPU æ¸©åº¦/åŠŸç‡ ä¸ å†…å­˜æ¸©åº¦ å°†è‡ªåŠ¨å˜ä¸ºå®æµ‹å€¼
-echo      ï¼ˆæ— éœ€ä¿®æ”¹æœ¬é¢æ¿ä»»ä½•é…ç½®ï¼Œæ£€æµ‹å¤±è´¥æ—¶ä¼šè‡ªåŠ¨å›é€€ä¸º N/A / TDP ä¼°ç®—ï¼‰
+echo  ÏÂÔØÍê³É£¡Çë°´ÒÔÏÂ²½ÖèÆôÓÃÕæÊµÎÂ¶È / ¹¦ÂÊ£º
+echo   1) ÒÔ¡¾¹ÜÀíÔ±Éí·İ¡¿ÔËĞĞ  LibreHardwareMonitor\LibreHardwareMonitor.exe
+echo   2) ²Ëµ¥ ¡°Ñ¡Ïî(Options)¡± ÖĞ¹´Ñ¡£º
+echo        - ÆôÓÃ WMI (Enable WMI)
+echo        - ÔËĞĞ Web ·şÎñÆ÷ (Run Web server on localhost:8085)
+echo   3) ÖØĞÂ´ò¿ª¼à²âÃæ°å£¬CPU ÎÂ¶È/¹¦ÂÊ Óë ÄÚ´æÎÂ¶È ½«×Ô¶¯±äÎªÊµ²âÖµ
+echo      £¨ÎŞĞèĞŞ¸Ä±¾Ãæ°åÈÎºÎÅäÖÃ£¬¼ì²âÊ§°ÜÊ±»á×Ô¶¯»ØÍËÎª N/A / TDP ¹ÀËã£©
 echo ============================================================
 pause

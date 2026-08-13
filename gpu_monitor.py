@@ -21,9 +21,27 @@ import argparse
 import json
 import os
 import secrets
+import socket
 import subprocess
 import sys
+
+# 后台(pythonw)运行时, 调用控制台子进程(powershell 等)必须隐藏其窗口,
+# 否则 Windows 会为每个被调用的 powershell 弹出一个控制台窗口。
+# CREATE_NO_WINDOW 仅 Windows 有效, 其它平台取 0 (无副作用)。
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 import threading
+
+# 统一的诊断日志: 记录进程生命周期关键事件 (SIGTERM / 异常崩溃 / 自愈重启),
+# 用于排查"服务莫名关闭"类问题 —— server_err.log 平时为空即说明非 Python 崩溃。
+def _errlog(msg):
+    try:
+        _ef = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "server_err.log"),
+                   "a", encoding="utf-8")
+        _ef.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg))
+        _ef.close()
+    except Exception:
+        pass
+
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
@@ -174,6 +192,7 @@ def _query_pdh_proc_mem():
         r = subprocess.run(
             ["powershell", "-NoProfile", "-Command", _PDH_SCRIPT],
             capture_output=True, text=True, timeout=8,
+            creationflags=CREATE_NO_WINDOW,
         )
         for line in r.stdout.splitlines():
             if "=" in line:
@@ -526,6 +545,10 @@ class Monitor:
             })
         processes.sort(key=lambda p: (p["vram_mb"] or 0), reverse=True)
 
+        # 收窄 proc_util: 仅保留当前活跃进程 PID, 防止字典随短命进程(GPU 任务频繁启停)无限增长导致内存泄漏/OOM
+        _alive = set(proc_pids.keys())
+        self._proc_util[idx] = {p: self._proc_util[idx].get(p, {}) for p in _alive}
+
         spec = GPU_SPECS.get(name, DEFAULT_SPEC)
         gpu_u = float(util.gpu)
         mem_u = float(util.memory)
@@ -781,7 +804,8 @@ SYS_STATIC = {
 def _wmi_json(script):
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-Command", script],
-                           capture_output=True, timeout=15)
+                           capture_output=True, timeout=15,
+                           creationflags=CREATE_NO_WINDOW)
         return r.stdout.decode("utf-8", errors="replace").strip()
     except Exception:
         return None
@@ -869,9 +893,22 @@ class SysMonitor:
         self._stop = False
         self._last_disk = None
         self._last_disk_t = 0
+        # 网络 / 磁盘 I/O 差分状态 (io_thread 使用)
+        self._last_net = None
+        self._last_net_t = 0
+        self._last_disk_io = None
+        self._last_disk_io_t = 0
+        # 每网卡 / 每物理磁盘 差分状态 (进阶版明细)
+        self._last_net_pernic = {}
+        self._last_net_pernic_t = 0
+        self._last_disk_perdisk = {}
+        self._last_disk_perdisk_t = 0
+        self.net = {"rx_mbs": None, "tx_mbs": None, "ifaces": []}
+        self.disk = {"read_mbs": None, "write_mbs": None, "parts": [], "disks": []}
         # LibreHardwareMonitor 客户端 (真实 CPU 温度/功率, 内存温度); 无则 None
         self.lhm = _make_lhm()
         threading.Thread(target=self._lhm_loop, daemon=True).start()
+        threading.Thread(target=self.io_thread, daemon=True).start()
 
     # ---- LHM 轮询线程: 每 ~2s 触发一次 (内部按 poll_interval 节流) ----
     def _lhm_loop(self):
@@ -937,7 +974,8 @@ class SysMonitor:
                 # 提交内存占比 (负载) via 性能计数器
                 try:
                     r = subprocess.run(["powershell", "-NoProfile", "-Command", perf_commit],
-                                       capture_output=True, text=True, timeout=10)
+                                       capture_output=True, text=True, timeout=10,
+                                       creationflags=CREATE_NO_WINDOW)
                     vals = [float(x) for x in r.stdout.split() if x.strip()]
                     if vals:
                         with self.lock:
@@ -947,6 +985,129 @@ class SysMonitor:
             except Exception:
                 pass
             time.sleep(2)
+
+    # ---- 网络 / 磁盘 I/O 线程: 每 ~2s ----
+    def io_thread(self):
+        while not self._stop:
+            try:
+                now = time.time()
+                # 网络: 所有网卡合计收发字节差分 -> MB/s
+                try:
+                    n = psutil.net_io_counters()
+                    if n:
+                        if self._last_net:
+                            dt = now - self._last_net_t
+                            if dt > 0:
+                                with self.lock:
+                                    self.net["rx_mbs"] = round((n.bytes_recv - self._last_net[0]) / dt / 1e6, 1)
+                                    self.net["tx_mbs"] = round((n.bytes_sent - self._last_net[1]) / dt / 1e6, 1)
+                        self._last_net = (n.bytes_recv, n.bytes_sent)
+                        self._last_net_t = now
+                except Exception:
+                    pass
+                # 每网卡明细: 收发速率 + IP + 链路速率 (进阶版)
+                try:
+                    n_per = psutil.net_io_counters(pernic=True)
+                    if n_per:
+                        dt = now - self._last_net_pernic_t
+                        addrs = psutil.net_if_addrs()
+                        stats = psutil.net_if_stats()
+                        ifaces = []
+                        for name, c in n_per.items():
+                            prev = self._last_net_pernic.get(name)
+                            rx = tx = None
+                            if prev and dt > 0:
+                                rx = round((c.bytes_recv - prev[0]) / dt / 1e6, 1)
+                                tx = round((c.bytes_sent - prev[1]) / dt / 1e6, 1)
+                            ip = ""
+                            sa = addrs.get(name, [])
+                            for sn in sa:
+                                if sn.family == socket.AF_INET:
+                                    ip = sn.address
+                                    break
+                            if not ip:
+                                for sn in sa:
+                                    if sn.family == socket.AF_INET6:
+                                        ip = sn.address
+                                        break
+                            sp = stats.get(name)
+                            speed = sp.speed if sp else 0
+                            up = sp.isup if sp else None
+                            ifaces.append({"name": name, "rx_mbs": rx, "tx_mbs": tx,
+                                           "ip": ip, "speed_mbps": speed or 0, "up": bool(up)})
+                        with self.lock:
+                            self.net["ifaces"] = ifaces
+                        self._last_net_pernic = {k: (c.bytes_recv, c.bytes_sent) for k, c in n_per.items()}
+                        self._last_net_pernic_t = now
+                except Exception:
+                    pass
+                # 磁盘 I/O: 所有物理盘合计读写字节差分 -> MB/s
+                try:
+                    d = psutil.disk_io_counters()
+                    if d:
+                        if self._last_disk_io:
+                            dt = now - self._last_disk_io_t
+                            if dt > 0:
+                                with self.lock:
+                                    self.disk["read_mbs"] = round((d.read_bytes - self._last_disk_io[0]) / dt / 1e6, 1)
+                                    self.disk["write_mbs"] = round((d.write_bytes - self._last_disk_io[1]) / dt / 1e6, 1)
+                        self._last_disk_io = (d.read_bytes, d.write_bytes)
+                        self._last_disk_io_t = now
+                except Exception:
+                    pass
+                # 每物理磁盘读写速率明细 (进阶版)
+                try:
+                    d_per = psutil.disk_io_counters(perdisk=True)
+                    if d_per:
+                        dt = now - self._last_disk_perdisk_t
+                        disks = []
+                        for name, c in d_per.items():
+                            prev = self._last_disk_perdisk.get(name)
+                            rd = wr = None
+                            if prev and dt > 0:
+                                rd = round((c.read_bytes - prev[0]) / dt / 1e6, 1)
+                                wr = round((c.write_bytes - prev[1]) / dt / 1e6, 1)
+                            disks.append({"name": name, "read_mbs": rd, "write_mbs": wr})
+                        with self.lock:
+                            self.disk["disks"] = disks
+                        self._last_disk_perdisk = {k: (c.read_bytes, c.write_bytes) for k, c in d_per.items()}
+                        self._last_disk_perdisk_t = now
+                except Exception:
+                    pass
+                # 磁盘容量使用率: 各挂载点
+                try:
+                    parts = []
+                    for p in psutil.disk_partitions(all=False):
+                        try:
+                            u = psutil.disk_usage(p.mountpoint)
+                            parts.append({
+                                "mount": p.mountpoint,
+                                "fstype": p.fstype,
+                                "total_gib": round(u.total / (1024 ** 3), 1),
+                                "used_gib": round(u.used / (1024 ** 3), 1),
+                                "pct": round(u.percent, 1),
+                            })
+                        except Exception:
+                            continue
+                    with self.lock:
+                        self.disk["parts"] = parts
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            time.sleep(2)
+
+    def io_snapshot(self):
+        with self.lock:
+            return {
+                "net": dict(self.net),
+                "disk": {
+                    "read_mbs": self.disk["read_mbs"],
+                    "write_mbs": self.disk["write_mbs"],
+                    "parts": list(self.disk["parts"]),
+                    "disks": list(self.disk["disks"]),
+                },
+            }
 
     def cpu_snapshot(self):
         with self.lock:
@@ -1008,7 +1169,8 @@ class SysMonitor:
 class History:
     COLS = ["ts", "gpu_pw", "gpu_util", "gpu_temp", "gpu_e_wh",
             "cpu_util", "cpu_pw", "cpu_e_wh", "mem_pct",
-            "total_pw", "total_e_wh", "total_cost"]
+            "total_pw", "total_e_wh", "total_cost",
+            "net_rx_mbs", "net_tx_mbs", "disk_read_mbs", "disk_write_mbs"]
     RANGES = {"1h": 3600, "6h": 21600, "24h": 86400, "7d": 604800, "30d": 2592000}
 
     def __init__(self, path, interval=5.0, retention_days=30):
@@ -1023,14 +1185,29 @@ class History:
             " cpu_util REAL, cpu_pw REAL, cpu_e_wh REAL, mem_pct REAL, total_pw REAL,"
             " total_e_wh REAL, total_cost REAL)")
         self.conn.commit()
+        # 兼容旧库 (运行过早期版本, 仅 12 列): 缺失的网络/磁盘列用 ALTER 补齐
+        self._migrate()
+
+    def _migrate(self):
+        try:
+            existing = {r[1] for r in self.conn.execute("PRAGMA table_info(samples)").fetchall()}
+            for col, ctype in [("net_rx_mbs", "REAL"), ("net_tx_mbs", "REAL"),
+                               ("disk_read_mbs", "REAL"), ("disk_write_mbs", "REAL")]:
+                if col not in existing:
+                    self.conn.execute("ALTER TABLE samples ADD COLUMN %s %s" % (col, ctype))
+            self.conn.commit()
+        except Exception:
+            pass
 
     def add(self, gpu_pw, gpu_util, gpu_temp, gpu_e_wh, cpu_util, cpu_pw, cpu_e_wh,
-            mem_pct, total_pw, total_e_wh, total_cost):
+            mem_pct, total_pw, total_e_wh, total_cost,
+            net_rx_mbs=None, net_tx_mbs=None, disk_read_mbs=None, disk_write_mbs=None):
         try:
             self.conn.execute(
-                "INSERT OR REPLACE INTO samples VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO samples VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (time.time(), gpu_pw, gpu_util, gpu_temp, gpu_e_wh, cpu_util, cpu_pw,
-                 cpu_e_wh, mem_pct, total_pw, total_e_wh, total_cost))
+                 cpu_e_wh, mem_pct, total_pw, total_e_wh, total_cost,
+                 net_rx_mbs, net_tx_mbs, disk_read_mbs, disk_write_mbs))
             self.conn.commit()
         except Exception:
             pass
@@ -1049,7 +1226,9 @@ class History:
         try:
             cur = self.conn.execute(
                 "SELECT ts,gpu_pw,gpu_util,gpu_temp,gpu_e_wh,cpu_util,cpu_pw,cpu_e_wh,"
-                "mem_pct,total_pw,total_e_wh,total_cost FROM samples WHERE ts>=? ORDER BY ts ASC",
+                "mem_pct,total_pw,total_e_wh,total_cost,"
+                "net_rx_mbs,net_tx_mbs,disk_read_mbs,disk_write_mbs "
+                "FROM samples WHERE ts>=? ORDER BY ts ASC",
                 (start,))
             rows = cur.fetchall()
         except Exception:
@@ -1115,7 +1294,18 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, json.dumps({"error": str(e)}))
             return
         if path == "/api/cpu":
-            self._send(200, json.dumps(self.sys.cpu_snapshot() if self.sys else {"error": "sys monitor unavailable"}))
+            if self.sys:
+                try:
+                    d = self.sys.cpu_snapshot()
+                    try:
+                        d.update(self.sys.io_snapshot())
+                    except Exception:
+                        pass
+                    self._send(200, json.dumps(d))
+                except Exception as e:
+                    self._send(500, json.dumps({"error": str(e)}))
+            else:
+                self._send(200, json.dumps({"error": "sys monitor unavailable"}))
             return
         if path == "/api/memory":
             self._send(200, json.dumps(self.sys.mem_snapshot() if self.sys else {"error": "sys monitor unavailable"}))
@@ -1175,6 +1365,10 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
             def _shutdown():
+                try:
+                    _errlog("shutdown via /api/shutdown")
+                except Exception:
+                    pass
                 try:
                     if Handler.monitor:
                         Handler.monitor._stop = True
@@ -1301,7 +1495,13 @@ def main():
                 mp = m["percent"] if m else None
                 te = ms["total_energy_wh"]; tc = ms["elec_cost_yuan"]
                 total_pw = (gpw or 0) + (cpw or 0)
-                history.add(gpw, gu, gt, ge, cu, cpw, ce, mp, total_pw, te, tc)
+                io = sys_monitor.io_snapshot() if sys_monitor else None
+                nrx = io["net"]["rx_mbs"] if io else None
+                ntx = io["net"]["tx_mbs"] if io else None
+                dr = io["disk"]["read_mbs"] if io else None
+                dw = io["disk"]["write_mbs"] if io else None
+                history.add(gpw, gu, gt, ge, cu, cpw, ce, mp, total_pw, te, tc,
+                            nrx, ntx, dr, dw)
                 history.prune()
             except Exception:
                 pass
@@ -1309,6 +1509,13 @@ def main():
 
     print(f"> 监控面板已启动: {url}")
     print("> 按 Ctrl+C 退出 (后台模式请用 stop 脚本)。")
+    # 落盘启动日志 (pythonw 无控制台, 便于后台排障)
+    try:
+        _lf = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "server.log"), "a", encoding="utf-8")
+        _lf.write("%s 监控面板已启动: %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), url))
+        _lf.close()
+    except Exception:
+        pass
 
     def _safe_save(m):
         try:
@@ -1318,6 +1525,10 @@ def main():
 
     # 优雅退出: 支持后台 stop 脚本的 taskkill (SIGTERM)
     def _graceful_stop(signum, frame):
+        try:
+            _errlog("SIGTERM received, graceful shutdown")
+        except Exception:
+            pass
         try:
             monitor._stop = True
         except Exception:
@@ -1342,21 +1553,51 @@ def main():
     except Exception:
         pass
     import atexit
+    atexit.register(lambda: _errlog("atexit: process exiting (clean exit -> NOT killed/OOM)"))
     atexit.register(lambda: _safe_save(meter))
 
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\n> 正在关闭 ...")
-        monitor._stop = True
-        meter.save(force=True)
+    # serve_forever 自愈: 若因异常退出(非 KeyboardInterrupt), 记录并重建 server 继续服务, 避免"莫名关闭"
+    while True:
         try:
-            if history is not None:
-                history.close()
-        except Exception:
-            pass
-        server.shutdown()
+            server.serve_forever()
+            break  # 正常情况下 serve_forever 不会主动返回
+        except KeyboardInterrupt:
+            print("\n> 正在关闭 ...")
+            monitor._stop = True
+            meter.save(force=True)
+            try:
+                if history is not None:
+                    history.close()
+            except Exception:
+                pass
+            server.shutdown()
+            break
+        except Exception as _e:
+            _errlog("serve_forever crashed: %r -- auto-restarting server" % (_e,))
+            try:
+                server.shutdown()
+            except Exception:
+                pass
+            try:
+                server.server_close()
+            except Exception:
+                pass
+            time.sleep(1)
+            server = ThreadingHTTPServer((args.host, args.port), Handler)
+            continue
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        # 启动期崩溃落盘 (pythonw 无控制台, 否则直接闪退无信息)
+        import traceback as _tb
+        try:
+            _ef = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "server_err.log"), "a", encoding="utf-8")
+            _ef.write("\n=== FATAL %s ===\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
+            _tb.print_exc(file=_ef)
+            _ef.close()
+        except Exception:
+            pass
+        raise

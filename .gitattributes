@@ -1,0 +1,9 @@
+# Ensure Windows batch files keep CRLF so they run correctly after clone
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Source files use LF
+*.py text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+*.json text eol=lf

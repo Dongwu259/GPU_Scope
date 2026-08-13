@@ -224,6 +224,27 @@
         </div>
       </div>
 
+      <div class="grid" style="grid-template-columns:repeat(2,1fr);gap:14px;margin-bottom:14px">
+        <div class="card">
+          <h3>网络吞吐 <span class="tag">收发速率</span></h3>
+          <div class="flavors" style="margin:8px 0">
+            <span class="chip">↓ 接收 <b id="ovNetRx">--</b> MB/s</span>
+            <span class="chip">↑ 发送 <b id="ovNetTx">--</b> MB/s</span>
+          </div>
+          <div id="ovNetIfaces"></div>
+          <div class="note">所有网卡合计收发字节速率（psutil.net_io_counters 差分，不含协议开销）；下方为各网卡明细。</div>
+        </div>
+        <div class="card">
+          <h3>磁盘 I/O 与容量 <span class="tag">读写速率</span></h3>
+          <div class="flavors" style="margin:8px 0">
+            <span class="chip">读 <b id="ovDiskRd">--</b> MB/s</span>
+            <span class="chip">写 <b id="ovDiskWr">--</b> MB/s</span>
+          </div>
+          <div id="ovDiskParts"></div>
+          <div id="ovDiskDetail" style="margin-top:8px"></div>
+        </div>
+      </div>
+
       <div class="grid charts" style="margin-bottom:14px">
         <div class="card">
           <h3>整机功率 (W)</h3>
@@ -610,6 +631,19 @@
         </div>
       </div>
 
+      <div class="grid charts" style="margin-bottom:14px">
+        <div class="card">
+          <h3>网络吞吐 (MB/s)</h3>
+          <canvas id="chartHistNet"></canvas>
+          <div class="legend"><span><i style="background:var(--cyan)"></i>接收</span><span><i style="background:var(--violet)"></i>发送</span></div>
+        </div>
+        <div class="card">
+          <h3>磁盘读写 (MB/s)</h3>
+          <canvas id="chartHistDisk"></canvas>
+          <div class="legend"><span><i style="background:var(--accent)"></i>读</span><span><i style="background:var(--green)"></i>写</span></div>
+        </div>
+      </div>
+
       <div class="grid hero">
         <div class="card">
           <h3>累计能耗趋势 (度 / kWh)</h3>
@@ -624,7 +658,7 @@
       </div>
 
       <div class="note" style="color:var(--muted);font-size:11.5px;margin-top:14px">
-        采样间隔默认 5 秒（可用 --hist-interval 调整），曲线按时间范围自动降采样到约 720 点以流畅显示。CPU 温度/功率曲线在已安装 LibreHardwareMonitor 时才有数据，否则为空白。
+        采样间隔默认 5 秒（可用 --hist-interval 调整），曲线按时间范围自动降采样到约 720 点以流畅显示。CPU 温度/功率曲线在已安装 LibreHardwareMonitor 时才有数据，否则为空白。网络吞吐与磁盘读写曲线自进阶版起落盘。
       </div>
     </section>
 
@@ -686,7 +720,7 @@ let curFlops = null, latestCpu = null, latestMem = null;
 let latestGpu = null;
 let procData = [], procSort = {key: "vram_mb", dir: -1};
 let histRange = "24h";
-let Hh = {pwrG:[],pwrC:[],pwrT:[],uG:[],uC:[],tG:[],tC:[],eTot:[],cost:[]};
+let Hh = {pwrG:[],pwrC:[],pwrT:[],uG:[],uC:[],tG:[],tC:[],eTot:[],cost:[],netRx:[],netTx:[],diskRd:[],diskWr:[]};
 
 function setBar(id,pct){ const e=document.getElementById(id); if(e) e.style.width=Math.max(0,Math.min(100,pct))+"%"; }
 function fmt(n,d=2){ return (n==null||isNaN(n))?"--":Number(n).toFixed(d); }
@@ -1012,6 +1046,56 @@ function renderOverview(){
   document.getElementById("ovCost2").textContent="¥"+fmt(cost,3);
   const pmax = (g&&g.power.limit_watts?g.power.limit_watts:400) + (c&&c.tdp_w?c.tdp_w*1.3:200);
   setBar("ovPwrB", totalPwr/pmax*100);
+
+  if(c && c.net){
+    document.getElementById("ovNetRx").textContent = (c.net.rx_mbs!=null)? c.net.rx_mbs : "--";
+    document.getElementById("ovNetTx").textContent = (c.net.tx_mbs!=null)? c.net.tx_mbs : "--";
+    // 各网卡明细: 名称 / IP / 链路速率 / 收发速率 (进阶版)
+    const nb = document.getElementById("ovNetIfaces");
+    if(nb && c.net.ifaces && c.net.ifaces.length){
+      nb.innerHTML = c.net.ifaces.map(i=>{
+        const dot = i.up ? "background:#22c55e" : "background:#64748b";
+        const spd = i.speed_mbps ? (i.speed_mbps>=1000? (i.speed_mbps/1000)+" Gbps" : i.speed_mbps+" Mbps") : "未知";
+        const rx = (i.rx_mbs!=null)? i.rx_mbs : "--";
+        const tx = (i.tx_mbs!=null)? i.tx_mbs : "--";
+        const ip = i.ip ? i.ip : "—";
+        return `<div style="display:flex;justify-content:space-between;font-size:12px;color:#cbd5e1;padding:3px 0;border-bottom:1px solid rgba(255,255,255,.05)">
+          <span><i style="display:inline-block;width:7px;height:7px;border-radius:50%;${dot};margin-right:6px"></i>${i.name}</span>
+          <span style="color:#9ca3af">${ip} · ${spd}</span>
+          <span>↓${rx} ↑${tx}</span></div>`;
+      }).join("");
+    } else if(nb){
+      nb.innerHTML = "";
+    }
+  }
+  if(c && c.disk){
+    document.getElementById("ovDiskRd").textContent = (c.disk.read_mbs!=null)? c.disk.read_mbs : "--";
+    document.getElementById("ovDiskWr").textContent = (c.disk.write_mbs!=null)? c.disk.write_mbs : "--";
+    const box = document.getElementById("ovDiskParts");
+    if(box && c.disk.parts && c.disk.parts.length){
+      box.innerHTML = c.disk.parts.map(p=>{
+        const w = Math.max(0, Math.min(100, p.pct||0));
+        const cls = w>85 ? "b-pwr" : "b-acc";
+        return `<div style="margin:6px 0">
+          <div style="display:flex;justify-content:space-between;font-size:12px;color:#9ca3af">
+            <span>${p.mount}</span><span>${p.used_gib} / ${p.total_gib} GB · ${p.pct}%</span>
+          </div>
+          <div class="bar"><i class="${cls}" style="width:${w}%"></i></div>
+        </div>`;
+      }).join("");
+    }
+    // 各物理磁盘读写速率明细 (进阶版)
+    const db = document.getElementById("ovDiskDetail");
+    if(db && c.disk.disks && c.disk.disks.length){
+      db.innerHTML = `<div style="font-size:12px;color:var(--muted);margin:4px 0 2px">各物理磁盘读写速率</div>` +
+        c.disk.disks.map(d=>{
+          const rd = (d.read_mbs!=null)? d.read_mbs : "--";
+          const wr = (d.write_mbs!=null)? d.write_mbs : "--";
+          return `<div style="display:flex;justify-content:space-between;font-size:12px;color:#cbd5e1;padding:2px 0;border-bottom:1px solid rgba(255,255,255,.05)">
+            <span>${d.name}</span><span>读 ${rd} · 写 ${wr} MB/s</span></div>`;
+        }).join("");
+    }
+  }
 }
 
 /* ---------------- 图表绘制 (仅当前页) ---------------- */
@@ -1041,6 +1125,8 @@ function drawActiveCharts(){
     drawChart(document.getElementById("chartHistTmp"),[{data:Hh.tG,color:"#dc2626"},{data:Hh.tC,color:"#f59e0b"}]);
     drawChart(document.getElementById("chartHistEnergy"),[{data:Hh.eTot,color:"#0891b2"}]);
     drawChart(document.getElementById("chartHistCost"),[{data:Hh.cost,color:"#16a34a"}]);
+    drawChart(document.getElementById("chartHistNet"),[{data:Hh.netRx,color:"#0891b2"},{data:Hh.netTx,color:"#7c3aed"}]);
+    drawChart(document.getElementById("chartHistDisk"),[{data:Hh.diskRd,color:"#2563eb"},{data:Hh.diskWr,color:"#16a34a"}]);
   }
 }
 
@@ -1051,12 +1137,15 @@ async function loadHistory(){
     if(!d||!d.samples) return;
     const s=d.samples;
     Hh.pwrG=[];Hh.pwrC=[];Hh.pwrT=[];Hh.uG=[];Hh.uC=[];Hh.tG=[];Hh.tC=[];Hh.eTot=[];Hh.cost=[];
+    Hh.netRx=[];Hh.netTx=[];Hh.diskRd=[];Hh.diskWr=[];
     s.forEach(r=>{
       Hh.pwrG.push(r.gpu_pw); Hh.pwrC.push(r.cpu_pw); Hh.pwrT.push(r.total_pw);
       Hh.uG.push(r.gpu_util); Hh.uC.push(r.cpu_util);
       Hh.tG.push(r.gpu_temp); Hh.tC.push(r.cpu_temp);
       Hh.eTot.push(r.total_e_wh!=null?r.total_e_wh/1000:null);
       Hh.cost.push(r.total_cost);
+      Hh.netRx.push(r.net_rx_mbs); Hh.netTx.push(r.net_tx_mbs);
+      Hh.diskRd.push(r.disk_read_mbs); Hh.diskWr.push(r.disk_write_mbs);
     });
     const span = s.length? (s[s.length-1].ts - s[0].ts) : 0;
     document.getElementById("histMeta").textContent = `样本 ${s.length} 点 · 跨度 ${fmt(span/3600,1)} 小时`;
