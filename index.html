@@ -61,6 +61,8 @@
 
   .hero .big{font-size:46px;font-weight:800;letter-spacing:-.02em;font-variant-numeric:tabular-nums;line-height:1.05}
   .hero .big small{font-size:17px;font-weight:600;color:var(--muted);margin-left:4px}
+  .hero .substat{margin-top:10px;font-size:13px;color:var(--ink);font-variant-numeric:tabular-nums}
+  .hero .substat b{font-size:16px;color:#2563eb;font-weight:800}
   .hero .flavors{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
   .chip{font-size:12px;padding:5px 10px;border-radius:999px;background:#f3f4f6;border:1px solid var(--line);color:var(--ink);font-variant-numeric:tabular-nums}
   .chip b{font-weight:700}
@@ -274,6 +276,7 @@
         <div class="card">
           <h3>等效 AI 算力 <span class="tag">FP16/BF16 稠密 · 实时估算</span></h3>
           <div class="big"><span id="aiFlops">--</span><small>TFLOPS</small></div>
+          <div class="substat" id="aiCumH100">累计 H100 等效运行 <b>--</b></div>
           <div id="ladder" class="ladder"></div>
           <div class="note">
             头条 = Tensor Core FP16/BF16 <b>稠密</b> 峰值 × GPU 利用率。视频生成(扩散模型)以张量核心矩阵乘为主，故以此作为等效 AI 算力。下方为各精度档位的理论峰值与当前有效值（峰值 × 利用率）。注意：NVIDIA 营销的 "1801 AI TOPS" 实为 <b>FP4 稀疏</b>，并非 FP16。估算基于规格表与硬件利用率计数器，非直接张量活跃度测量。
@@ -703,6 +706,24 @@
         <div class="note" style="margin-top:12px">清除后累计能耗 / 电费 / 每日明细将归零（电价保留）。仅影响持久化计量，不影响当前实时指标与图表。</div>
         <div id="setMsg" class="alert" style="display:none"></div>
       </div>
+
+      <div class="card" style="margin-bottom:14px">
+        <h3>关于 GPU_Scope <span class="tag">开源 · MIT</span></h3>
+        <div class="kv" id="setAbout">
+          <div class="row"><span class="k">项目名称</span><span class="v">GPU_Scope</span></div>
+          <div class="row"><span class="k">版本</span><span class="v">0.1.0</span></div>
+          <div class="row"><span class="k">许可证</span><span class="v">MIT License</span></div>
+          <div class="row"><span class="k">作者</span><span class="v">Dongwu259</span></div>
+          <div class="row"><span class="k">累计 H100 等效运行</span><span class="v" id="setCumH100">-- H100·h</span></div>
+        </div>
+        <div class="note" style="margin-top:12px">
+          实时 GPU 监测面板 · 数据源 NVIDIA NVML + psutil + Windows 性能计数器 + LibreHardwareMonitor（可选）。
+          累计算力以「H100(SXM) FP16 Tensor 稠密峰值 ≈ 989 TFLOPS」为基准，将各卡「利用率 × 时长」折算成 H100 等效算力时长，跨重启持久化于 meter.json。
+        </div>
+        <div style="margin-top:12px">
+          <a class="btn" href="https://github.com/Dongwu259/GPU_Scope" target="_blank" rel="noopener">在 GitHub 上查看 ↗</a>
+        </div>
+      </div>
     </section>
 
     <div class="footer">
@@ -770,6 +791,8 @@ function renderGpu(g){
   document.getElementById("gpuSub").textContent=`驱动 ${g.driver} · CUDA ${g.cuda} · ${g.spec.arch} · ${g.spec.cuda_cores} CUDA 核 · ${g.spec.tensor_cores} Tensor 核`;
 
   document.getElementById("aiFlops").textContent=fmt(curFlops,1);
+  const cumH100 = g.system ? g.system.gpu_h100_hours_cum : null;
+  document.getElementById("aiCumH100").innerHTML = "累计 H100 等效运行 <b>" + (cumH100!=null?fmt(cumH100,2):"--") + " H100·h</b>";
   const lad=g.compute.ladder||[];
   const maxPeak=Math.max(...lad.map(x=>x.peak_tflops),1);
   document.getElementById("ladder").innerHTML=lad.map(x=>{
@@ -1188,6 +1211,8 @@ function renderSettings(){
     document.getElementById("setDaily").innerHTML = days.length
       ? days.map(([k,v])=>`<div class="row"><span class="k">${k}</span><span class="v">${(v/1000).toFixed(3)} 度</span></div>`).join("")
       : '<div class="row"><span class="k">暂无数据</span><span class="v">--</span></div>';
+    const cumH100 = document.getElementById("setCumH100");
+    if(cumH100) cumH100.textContent = (d.gpu_h100_hours!=null?d.gpu_h100_hours.toFixed(2):"--") + " H100·h";
   });
 }
 function setMsg(text, ok){

@@ -143,6 +143,36 @@ GPU_SPECS = {
 }
 DEFAULT_SPEC = GPU_SPECS["NVIDIA GeForce RTX 5080"]
 
+# ---------------------------------------------------------------------------
+# 等效 H100 GPU 小时: 把各型号 GPU 的"利用率 × 时长"折算成 H100 等效算力时长。
+# 基准 = H100(SXM) FP16 Tensor 稠密峰值 (~989 TFLOPS)。系数 = 该卡 FP16 Tensor
+# 稠密 TFLOPS / 989。用于累计"本机累计贡献了多少 H100 等效算力时长"。
+# ---------------------------------------------------------------------------
+_H100_TF16_DENSE = 989.0  # H100 FP16 Tensor 稠密峰值 (TFLOPS)
+
+# 规格表未收录的常见数据中心/计算卡, 按名称子串匹配给定相对系数
+_H100_FACTOR_TABLE = {
+    "H100": 1.0, "H800": 1.0, "H20": 0.62, "A100": 0.315, "A800": 0.315,
+    "L40S": 0.30, "L40": 0.24, "A40": 0.18, "A30": 0.13, "A10": 0.10,
+    "A10G": 0.10, "V100": 0.125, "T4": 0.035, "P100": 0.06, "M60": 0.03,
+    "RTX 6000": 0.42, "RTX A6000": 0.22, "RTX A5000": 0.16,
+    "RTX A4000": 0.11, "RTX 5090": 0.4235, "RTX 5080": 0.2276,
+    "RTX 5070": 0.18, "RTX 4090": 0.3338, "RTX 4080": 0.23, "RTX 4070": 0.15,
+    "RTX 4060": 0.10, "RTX 3090": 0.1440, "RTX 3080": 0.10, "RTX 3060": 0.06,
+}
+
+
+def h100_factor(name):
+    """返回某 GPU 相对 H100 的算力系数 (基于 FP16 Tensor 稠密 TFLOPS)。"""
+    if not name:
+        return 0.1
+    if name in GPU_SPECS:
+        return max(0.01, GPU_SPECS[name]["tensor_fp16_dense_tflops"] / _H100_TF16_DENSE)
+    for key, f in _H100_FACTOR_TABLE.items():
+        if key in name:
+            return f
+    return 0.1  # 未知型号给保守默认
+
 THROTTLE_REASONS = {
     0x1: "GPU 空闲降频", 0x2: "应用自定义时钟设置", 0x4: "软件功率上限 (Power Cap)",
     0x8: "硬件减速 (过热/供电)", 0x10: "Sync Boost 同步", 0x20: "软件热节流 (SW Thermal)",
@@ -212,6 +242,7 @@ def _query_pdh_proc_mem():
 _METER_DEFAULT = {
     "gpu_energy_wh": 0.0, "cpu_energy_wh": 0.0, "total_energy_wh": 0.0,
     "elec_cost_yuan": 0.0, "elec_rate": 0.60,
+    "gpu_hours": 0.0, "gpu_h100_hours": 0.0,
     "first_seen": None, "updated_at": None, "daily": {},
 }
 
@@ -291,6 +322,20 @@ class Meter:
             self._add_daily(wh)
         self.save()
 
+    def add_gpu_hours(self, gpu_hours, h100_hours):
+        """累计 GPU 运行小时: gpu_hours=原始(GPU数×利用率×时长), h100_hours=H100 等效。
+
+        前者是"本机所有卡按利用率加权后的真实运行小时",后者折算成 H100 等效算力时长。
+        """
+        if gpu_hours <= 0 and h100_hours <= 0:
+            return
+        with self.lock:
+            if self.data["first_seen"] is None:
+                self.data["first_seen"] = time.time()
+            self.data["gpu_hours"] += max(0.0, gpu_hours)
+            self.data["gpu_h100_hours"] += max(0.0, h100_hours)
+        self.save()
+
     def _add_daily(self, wh):
         day = time.strftime("%Y-%m-%d")
         self.data.setdefault("daily", {})
@@ -308,6 +353,8 @@ class Meter:
             self.data["cpu_energy_wh"] = 0.0
             self.data["total_energy_wh"] = 0.0
             self.data["elec_cost_yuan"] = 0.0
+            self.data["gpu_hours"] = 0.0
+            self.data["gpu_h100_hours"] = 0.0
             self.data["daily"] = {}
             self.data["first_seen"] = time.time()
         self.save(force=True)
@@ -320,6 +367,8 @@ class Meter:
                 "total_energy_wh": round(self.data["total_energy_wh"], 3),
                 "elec_cost_yuan": round(self.data["elec_cost_yuan"], 4),
                 "elec_rate": self.data["elec_rate"],
+                "gpu_hours": round(self.data["gpu_hours"], 4),
+                "gpu_h100_hours": round(self.data["gpu_h100_hours"], 4),
                 "first_seen": self.data["first_seen"],
                 "updated_at": self.data["updated_at"],
                 "daily": {k: round(v, 3) for k, v in self.data.get("daily", {}).items()},
@@ -356,6 +405,8 @@ class Monitor:
         # 能耗基线 (驱动实测累计能量, 用于计算采样间隔内的增量)
         self._energy_start = []
         self._gpu_last_energy_wh = []
+        # 每 GPU 上次采样时间戳 (用于累计 GPU 运行小时)
+        self._gpu_last_ts = []
         self._start_time = time.time()
         for h in self.handles:
             try:
@@ -364,6 +415,7 @@ class Monitor:
                 e0 = None
             self._energy_start.append(e0)
             self._gpu_last_energy_wh.append((e0 / 3.6e6) if e0 is not None else 0.0)
+            self._gpu_last_ts.append(None)
 
     # ---- PDH 后台线程 ----
     def mem_thread(self):
@@ -491,6 +543,17 @@ class Monitor:
             if _delta > 0:
                 self.meter.add_gpu(_delta)
             self._gpu_last_energy_wh[idx] = _cur_wh
+        # ---- 累计 GPU 运行小时 (H100 等效) ----
+        # 每次采样累加: 利用率(0~1) × 采样间隔(小时) → 该卡本段"加权运行小时",
+        # 再乘该卡相对 H100 的算力系数 → H100 等效算力时长。跨重启不丢 (落 meter.json)。
+        _now = time.time()
+        if self._gpu_last_ts[idx] is not None:
+            _dt = _now - self._gpu_last_ts[idx]
+            if 0 < _dt < 3600:  # 防异常大跳变 (如进程挂起/时钟回拨)
+                _frac = max(0.0, float(util.gpu)) / 100.0
+                _gh = _frac * (_dt / 3600.0)
+                self.meter.add_gpu_hours(gpu_hours=_gh, h100_hours=_gh * h100_factor(name))
+        self._gpu_last_ts[idx] = _now
         _meter_snap = self.meter.snapshot()
         _rate = self.meter.data["elec_rate"]
 
@@ -623,6 +686,8 @@ class Monitor:
                 "energy_wh_cum": round(gpu_cum_wh, 3),
                 "energy_kwh_cum": round(gpu_cum_kwh, 6),
                 "elec_cost_cum": round(gpu_cum_cost, 4),
+                "gpu_hours_cum": round(_meter_snap.get("gpu_hours", 0.0), 3),
+                "gpu_h100_hours_cum": round(_meter_snap.get("gpu_h100_hours", 0.0), 3),
                 "avg_power_since_start_w": round(avg_power, 1) if avg_power else None,
                 "compute_mode": compute_mode,
                 "pcie_replay_count": pcie_replay,
