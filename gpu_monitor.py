@@ -442,6 +442,32 @@ class Monitor:
             with self.lock:
                 self.snapshots[i] = snap
 
+    def gpu_cluster_summary(self):
+        """服务器算力集群聚合: 多卡 GPU 的算力/功率/数量汇总, 以及折算 H100 等效。"""
+        gpus = self.get_snapshot()
+        summary = {
+            "gpu_count": 0, "total_effective_tflops": 0.0, "total_peak_tflops": 0.0,
+            "total_power_w": 0.0, "h100_equiv_effective_tflops": 0.0,
+            "h100_equiv_peak_tflops": 0.0, "gpu_names": [],
+        }
+        for g in gpus:
+            if not g or g.get("error"):
+                continue
+            f = h100_factor(g["name"])
+            e = g["compute"]["effective_tflops"]
+            pk = g["compute"]["peak_tflops"]
+            summary["gpu_count"] += 1
+            summary["total_effective_tflops"] += e
+            summary["total_peak_tflops"] += pk
+            summary["total_power_w"] += (g["power"]["watts"] or 0)
+            summary["h100_equiv_effective_tflops"] += e * f
+            summary["h100_equiv_peak_tflops"] += pk * f
+            summary["gpu_names"].append(g["name"])
+        for k in ("total_effective_tflops", "total_peak_tflops", "total_power_w",
+                  "h100_equiv_effective_tflops", "h100_equiv_peak_tflops"):
+            summary[k] = round(summary[k], 2)
+        return summary
+
     def _read_device(self, h, idx):
         nv = self.nvml
         name = nv.nvmlDeviceGetName(h)
@@ -860,6 +886,9 @@ def _make_lhm():
 #       若安装了 LibreHardwareMonitor, 会优先用其读取真实 CPU 温度/功率与内存温度。
 # ---------------------------------------------------------------------------
 SYS_STATIC = {
+    "sockets": 1,
+    # 每路 CPU (多路服务器): {name, cores, threads, max_mhz, voltage_v, tdp_w}
+    "cpus": [],
     "cpu_name": None, "cpu_tdp_w": 125.0, "ram_speed_mhz": None,
     "cpu_voltage_v": None, "cpu_cores": None, "cpu_threads": None,
     "cpu_max_mhz": None, "ram_total_gib": None,
@@ -899,20 +928,44 @@ def _init_sys_static():
     if psutil:
         s["cpu_cores"] = psutil.cpu_count(logical=False)
         s["cpu_threads"] = psutil.cpu_count(logical=True)
-    out = _wmi_json("Get-CimInstance Win32_Processor | Select Name,MaxClockSpeed,CurrentVoltage | ConvertTo-Json")
+    # 多路 CPU: Win32_Processor 每路返回一条记录, 逐路解析型号/核心/线程/频率
+    cpus = []
+    out = _wmi_json("Get-CimInstance Win32_Processor | Select Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed,CurrentVoltage | ConvertTo-Json")
     try:
         if out:
             d = json.loads(out)
-            if isinstance(d, list):
-                d = d[0]
-            s["cpu_name"] = (d.get("Name") or "").strip()
-            s["cpu_max_mhz"] = int(d.get("MaxClockSpeed") or 0) or None
-            cv = d.get("CurrentVoltage")
-            if cv:
-                # WMI CurrentVoltage 单位非标准, 经验上约为 0.1V 的 VID 读数
-                s["cpu_voltage_v"] = round(cv * 0.1, 3)
+            if isinstance(d, dict):
+                d = [d]
+            for item in d:
+                name = (item.get("Name") or "").strip()
+                cores = int(item.get("NumberOfCores") or 0) or None
+                threads = int(item.get("NumberOfLogicalProcessors") or 0) or None
+                max_mhz = int(item.get("MaxClockSpeed") or 0) or None
+                cv = item.get("CurrentVoltage")
+                volt = round(cv * 0.1, 3) if cv else None
+                cpus.append({
+                    "name": name, "cores": cores, "threads": threads,
+                    "max_mhz": max_mhz, "voltage_v": volt,
+                    "tdp_w": _guess_tdp(name),
+                })
     except Exception:
         pass
+    if not cpus:
+        # 兜底: 无 WMI 时按 psutil 总核心数估一个单路
+        n = psutil.cpu_count(logical=False) or 8
+        cpus.append({
+            "name": "CPU", "cores": n, "threads": psutil.cpu_count(logical=True),
+            "max_mhz": 3000, "voltage_v": None, "tdp_w": _guess_tdp(None),
+        })
+    s["cpus"] = cpus
+    s["sockets"] = len(cpus)
+    s["cpu_cores"] = sum(c["cores"] or 0 for c in cpus) or (psutil.cpu_count(logical=False) or 8)
+    s["cpu_threads"] = sum(c["threads"] or 0 for c in cpus) or (psutil.cpu_count(logical=True) or 8)
+    s["cpu_name"] = cpus[0]["name"]
+    s["cpu_max_mhz"] = cpus[0]["max_mhz"]
+    s["cpu_voltage_v"] = cpus[0]["voltage_v"]
+    # 总 TDP = 各路 TDP 之和 (服务器多路叠加)
+    s["cpu_tdp_w"] = sum(c["tdp_w"] or 0 for c in cpus) or 125.0
     out = _wmi_json("Get-CimInstance Win32_PhysicalMemory | Measure-Object -Property Capacity -Sum | Select -ExpandProperty Sum")
     try:
         if out and str(out).strip().isdigit():
@@ -928,15 +981,17 @@ def _init_sys_static():
                 s["ram_speed_mhz"] = int(sp)
     except Exception:
         pass
-    s["cpu_tdp_w"] = _guess_tdp(s["cpu_name"])
 
 
 def _cpu_peaks():
-    cores = SYS_STATIC["cpu_cores"] or 8
-    ghz = (SYS_STATIC["cpu_max_mhz"] or 3000) / 1000.0
-    # 每核心每周期: AVX2(256-bit)=16 FLOP, AVX-512(512-bit)=32 FLOP (单 FMA 单元)
-    avx2 = cores * ghz * 16.0     # GFLOPS
-    avx512 = cores * ghz * 32.0   # GFLOPS
+    avx2 = avx512 = 0.0
+    # 逐路 CPU 叠加 (服务器多路): 每路 核心数 × 最高频率 × 每周期 FLOP
+    for cpu in SYS_STATIC["cpus"]:
+        cores = cpu["cores"] or 8
+        ghz = (cpu["max_mhz"] or 3000) / 1000.0
+        # 每核心每周期: AVX2(256-bit)=16 FLOP, AVX-512(512-bit)=32 FLOP (单 FMA 单元)
+        avx2 += cores * ghz * 16.0
+        avx512 += cores * ghz * 32.0
     return avx2, avx512
 
 
@@ -948,6 +1003,7 @@ class SysMonitor:
         self.cpu = {
             "util": 0.0, "per_core": [], "freq": None, "temp": None,
             "voltage_v": SYS_STATIC["cpu_voltage_v"], "power_w": None,
+            "sockets": [],  # 每路 CPU: {name,cores,threads,util,per_core,power_w,tdp_w}
         }
         self._cpu_last_acc_t = time.time()
         self.mem = {
@@ -992,20 +1048,35 @@ class SysMonitor:
                 per = psutil.cpu_percent(interval=1.0, percpu=True)
                 util = (sum(per) / len(per)) if per else 0.0
                 freq = psutil.cpu_freq()
-                tdp = SYS_STATIC["cpu_tdp_w"] or 125.0
-                idle = max(15.0, tdp * 0.15)
-                u = util / 100.0
-                pw = idle + (tdp * 1.3 - idle) * (u ** 1.1)  # 估算到 ~1.3×TDP
+                # 逐路 CPU: 把逻辑核心按每路线程数切片 (对称多路假设), 各路独立估算功率
+                sockets = []
+                idx = 0
+                for cpu in SYS_STATIC["cpus"]:
+                    n = cpu["threads"] or (cpu["cores"] or 1)
+                    chunk = per[idx:idx + n]
+                    idx += n
+                    su = (sum(chunk) / len(chunk)) if chunk else 0.0
+                    tdp = cpu["tdp_w"] or 125.0
+                    idle = max(15.0, tdp * 0.15)
+                    u = su / 100.0
+                    spw = idle + (tdp * 1.3 - idle) * (u ** 1.1)  # 估算到 ~1.3×TDP
+                    sockets.append({
+                        "name": cpu["name"], "cores": cpu["cores"], "threads": cpu["threads"],
+                        "util": round(su, 1), "per_core": [round(x, 1) for x in chunk],
+                        "power_w": round(spw, 1), "tdp_w": tdp,
+                    })
+                total_pw = sum(s["power_w"] for s in sockets)
                 now = time.time()
                 dt = now - self._cpu_last_acc_t
                 if dt > 0:
-                    self.meter.add_cpu(pw * dt / 3600.0)  # Wh
+                    self.meter.add_cpu(total_pw * dt / 3600.0)  # Wh
                     self._cpu_last_acc_t = now
                 with self.lock:
                     self.cpu["util"] = round(util, 1)
                     self.cpu["per_core"] = [round(x, 1) for x in per]
                     self.cpu["freq"] = round(freq.current, 0) if (freq and freq.current) else None
-                    self.cpu["power_w"] = round(pw, 1)
+                    self.cpu["power_w"] = round(total_pw, 1)
+                    self.cpu["sockets"] = sockets
             except Exception:
                 time.sleep(1)
 
@@ -1187,6 +1258,14 @@ class SysMonitor:
         real_pw = lhm.get("cpu_power_w") if (lhm.get("available") and lhm.get("cpu_power_w") is not None) else None
         power_est = real_pw is None
         pw = real_pw if real_pw is not None else c.get("power_w")
+        sockets = c.get("sockets") or []
+        socket_list = [{
+            "name": s["name"], "cores": s["cores"], "threads": s["threads"],
+            "utilization": s["util"], "per_core": s["per_core"],
+            "power_w": s["power_w"], "tdp_w": s["tdp_w"],
+        } for s in sockets]
+        total_cores = sum((s["cores"] or 0) for s in sockets) or (SYS_STATIC["cpu_cores"] or 0)
+        total_threads = sum((s["threads"] or 0) for s in sockets) or (SYS_STATIC["cpu_threads"] or 0)
         return {
             "name": SYS_STATIC["cpu_name"], "cores": SYS_STATIC["cpu_cores"],
             "threads": SYS_STATIC["cpu_threads"], "max_mhz": SYS_STATIC["cpu_max_mhz"],
@@ -1204,6 +1283,17 @@ class SysMonitor:
                 "avx512_peak_gflops": round(avx512, 1),
                 "avx2_effective_gflops": round(avx2 * util / 100.0, 1),
                 "avx512_effective_gflops": round(avx512 * util / 100.0, 1),
+            },
+            "sockets": socket_list,
+            "cluster": {
+                "sockets": len(socket_list),
+                "total_cores": total_cores,
+                "total_threads": total_threads,
+                "total_tdp_w": SYS_STATIC["cpu_tdp_w"],
+                "total_avx2_peak_gflops": round(avx2, 1),
+                "total_avx512_peak_gflops": round(avx512, 1),
+                "total_avx2_effective_gflops": round(avx2 * util / 100.0, 1),
+                "total_avx512_effective_gflops": round(avx512 * util / 100.0, 1),
             },
             "lhm": lhm,
             "temperature_source": "LibreHardwareMonitor" if cpu_temp is not None else None,
@@ -1347,7 +1437,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, json.dumps({"error": str(e)}))
             return
         if path == "/api/metrics":
-            self._send(200, json.dumps({"gpus": self.monitor.get_snapshot(), "server_time": time.time()}))
+            gpus = self.monitor.get_snapshot()
+            self._send(200, json.dumps({
+                "gpus": gpus,
+                "cluster": self.monitor.gpu_cluster_summary(),
+                "server_time": time.time(),
+            }))
             return
         if path.startswith("/api/metrics/"):
             try:
@@ -1543,16 +1638,19 @@ def main():
         while not getattr(monitor, "_stop", False):
             try:
                 time.sleep(history.interval)
-                g = monitor.get_snapshot(0)
+                # 多卡 GPU 聚合: 总功率/平均利用率/最高温度/累计能耗之和
+                gpus = monitor.get_snapshot()
+                gpus = [g for g in gpus if g and "error" not in g]
+                if gpus:
+                    gpw = sum((g["power"]["watts"] or 0) for g in gpus)
+                    gu = sum(g["utilization"]["gpu"] for g in gpus) / len(gpus)
+                    gt = max((g["temperature"]["c"] or 0) for g in gpus)
+                    ge = sum((g["system"].get("energy_wh_cum") or 0) for g in gpus)
+                else:
+                    gpw = gu = gt = None; ge = 0
                 c = sys_monitor.cpu_snapshot() if sys_monitor else None
                 m = sys_monitor.mem_snapshot() if sys_monitor else None
                 ms = meter.snapshot()
-                if g and "error" not in g:
-                    gpw = g["power"]["watts"]; gu = g["utilization"]["gpu"]
-                    gt = g["temperature"]["c"]
-                    ge = g["system"].get("energy_wh_cum") or 0
-                else:
-                    gpw = gu = gt = None; ge = 0
                 if c:
                     cu = c["utilization"]; cpw = c["power_w"]; ce = c["energy_wh"]
                 else:

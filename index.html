@@ -226,6 +226,29 @@
         </div>
       </div>
 
+      <div class="grid cards4" style="margin-bottom:14px">
+        <div class="card metric">
+          <div class="label"><span>集群 GPU 卡数</span><span id="clGpuCnt">--</span></div>
+          <div class="val" style="font-size:18px"><span id="clGpuNames">--</span></div>
+          <div class="note" style="margin-top:6px">集群内 NVIDIA GPU 总数</div>
+        </div>
+        <div class="card metric">
+          <div class="label"><span>CPU 路数 / 总核数</span><span id="clCpuSockets">--</span></div>
+          <div class="val"><span id="clCpuCores">--</span><small>核 / <span id="clCpuThreads">--</span> 线程</small></div>
+          <div class="note" style="margin-top:6px">多路 CPU 物理核心合计</div>
+        </div>
+        <div class="card metric">
+          <div class="label"><span>集群 AI 算力 (有效)</span><span>FP16 Tensor</span></div>
+          <div class="val"><span id="clGpuTflopsV">--</span><small>TFLOPS</small></div>
+          <div class="bar"><i class="b-acc" id="clGpuB" style="width:0%"></i></div>
+        </div>
+        <div class="card metric">
+          <div class="label"><span>集群 H100 等效 (有效)</span><span id="clH100">--</span></div>
+          <div class="val"><span id="clH100V">--</span><small>H100·TFLOPS</small></div>
+          <div class="bar"><i class="b-violet" id="clH100B" style="width:0%;background:var(--violet)"></i></div>
+        </div>
+      </div>
+
       <div class="grid" style="grid-template-columns:repeat(2,1fr);gap:14px;margin-bottom:14px">
         <div class="card">
           <h3>网络吞吐 <span class="tag">收发速率</span></h3>
@@ -269,7 +292,10 @@
     <section id="page-gpu" class="page" hidden>
       <div class="page-head">
         <h2 id="gpuName">GPU 监测面板</h2>
-        <div class="sub" id="gpuSub">正在连接 NVML …</div>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <div class="sub" id="gpuSub">正在连接 NVML …</div>
+          <select id="gpuSelect" class="input" style="width:auto;max-width:340px;padding:6px 10px;font-size:13px;display:none"></select>
+        </div>
       </div>
 
       <div class="grid hero" style="margin-bottom:14px">
@@ -499,6 +525,11 @@
       </div>
 
       <div class="card" style="margin-bottom:14px">
+        <h3>多路 CPU 明细 <span class="tag" id="cpuSocketTag">--</span></h3>
+        <div class="grid cards4" id="cpuSockets" style="grid-template-columns:repeat(auto-fill,minmax(190px,1fr))"></div>
+      </div>
+
+      <div class="card" style="margin-bottom:14px">
         <h3>能耗与电费 <span class="tag">持久化累计</span></h3>
         <div class="kv">
           <div class="row"><span class="k">累计耗电量 (CPU 估算)</span><span class="v" id="cpuEnergy">--</span></div>
@@ -714,7 +745,6 @@
           <div class="row"><span class="k">版本</span><span class="v">0.1.0</span></div>
           <div class="row"><span class="k">许可证</span><span class="v">MIT License</span></div>
           <div class="row"><span class="k">作者</span><span class="v">Dongwu259</span></div>
-          <div class="row"><span class="k">累计 H100 等效运行</span><span class="v" id="setCumH100">-- H100·h</span></div>
         </div>
         <div class="note" style="margin-top:12px">
           实时 GPU 监测面板 · 数据源 NVIDIA NVML + psutil + Windows 性能计数器 + LibreHardwareMonitor（可选）。
@@ -735,10 +765,11 @@
 <script>
 const MAXPTS = 120;
 const H = { flops:[], gpu:[], mem:[], pwr:[], tmp:[], smclk:[], memclk:[], enc:[], dec:[], bw:[],
-            cpuUtil:[], cpuPwr:[], cpuFreq:[], memPct:[], memRd:[], memWr:[], memLoad:[], totalPwr:[] };
+            cpuUtil:[], cpuPwr:[], cpuFreq:[], memPct:[], memRd:[], memWr:[], memLoad:[], totalPwr:[],
+            gpuPwrTot:[], gpuUtilAvg:[] };
 let activePage = "overview";
 let curFlops = null, latestCpu = null, latestMem = null;
-let latestGpu = null;
+let latestGpu = null, latestGpus = [], latestCluster = null, selectedGpuIdx = 0;
 let procData = [], procSort = {key: "vram_mb", dir: -1};
 let histRange = "24h";
 let Hh = {pwrG:[],pwrC:[],pwrT:[],uG:[],uC:[],tG:[],tC:[],eTot:[],cost:[],netRx:[],netTx:[],diskRd:[],diskWr:[]};
@@ -778,7 +809,14 @@ function pushHist(){
   if(latestMem){
     H.memPct.push(latestMem.percent); H.memRd.push(latestMem.pcie_read_mbs); H.memWr.push(latestMem.pcie_write_mbs); H.memLoad.push(latestMem.load_percent);
   }
-  H.totalPwr.push((latestGpu?latestGpu.power.watts:0) + (latestCpu?(latestCpu.power_w||0):0));
+  // 集群聚合 (多卡 GPU): 总功率 / 平均利用率 (供概览图表与总功率)
+  const gpus = latestGpus || (latestGpu?[latestGpu]:[]);
+  let gpt=0, gua=0, gc=0;
+  gpus.forEach(g=>{ if(g&&!g.error){ gpt+=(g.power.watts||0); gua+=(g.utilization.gpu||0); gc++; } });
+  if(gc) gua/=gc;
+  H.gpuPwrTot.push(gpt);
+  H.gpuUtilAvg.push(gc?gua:null);
+  H.totalPwr.push(gpt + ((latestCpu&&latestCpu.power_w)?latestCpu.power_w:0));
   for(const k in H){ if(H[k].length>MAXPTS) H[k].shift(); }
 }
 
@@ -992,6 +1030,28 @@ function renderCpu(d){
     if(b){ b.style.height=Math.max(2,u2/100*90)+"px";
       b.style.background = u2>85?"var(--red)":(u2>50?"var(--amber)":"var(--accent)"); }
     if(p){ p.textContent=Math.round(u2)+"%"; } });
+
+  // 多路 CPU 明细
+  const socks = d.sockets||[];
+  const tag = document.getElementById("cpuSocketTag");
+  if(tag) tag.textContent = socks.length>0? (socks.length+" 路") : "--";
+  const stEl = document.getElementById("cpuSockets");
+  if(stEl){
+    if(socks.length){
+      stEl.innerHTML = socks.map((s,i)=>{
+        const u = s.utilization||0;
+        const pw = (s.power_w!=null)? s.power_w : "--";
+        return `<div class="metric" style="padding:10px;border:1px solid var(--line);border-radius:10px">
+          <div class="label"><span>CPU ${i} · ${(s.name||"").slice(0,26)}</span><span>${u}%</span></div>
+          <div class="val" style="font-size:18px">${pw} <small>W</small></div>
+          <div class="bar"><i class="b-acc" style="width:${u}%"></i></div>
+          <div class="note" style="margin-top:6px">${s.cores||"?"} 核 / ${s.threads||"?"} 线程 · TDP ${s.tdp_w||"?"} W</div>
+        </div>`;
+      }).join("");
+    } else {
+      stEl.innerHTML = "";
+    }
+  }
 }
 
 /* ---------------- 内存 渲染 ---------------- */
@@ -1032,13 +1092,22 @@ function renderMem(d){
 /* ---------------- 整机概览 渲染 ---------------- */
 function renderOverview(){
   const g=latestGpu, c=latestCpu, m=latestMem;
-  const gpuPwr = g? g.power.watts : 0;
+  // 多卡 GPU 聚合: 总功率 / 平均利用率 / 总有效算力 / 累计能耗之和
+  const gpus = latestGpus||[];
+  let gpuPwr=0, ovGpuUtilVal=0, ovGpuFlopsVal=0, gpuEnergy=0, gc=0;
+  gpus.forEach(gp=>{ if(gp&&!gp.error){
+    gpuPwr += (gp.power.watts||0);
+    ovGpuUtilVal += (gp.utilization.gpu||0);
+    ovGpuFlopsVal += (gp.compute.effective_tflops||0);
+    gpuEnergy += (gp.system.energy_wh_since_start||0);
+    gc++;
+  }});
+  if(gc) ovGpuUtilVal/=gc;
   const cpuPwr = c? (c.power_w||0) : 0;
   const totalPwr = gpuPwr + cpuPwr;
-  const gpuEnergy = g? (g.system.energy_wh_since_start||0) : 0;
   const cpuEnergy = c? (c.energy_wh||0) : 0;
   const totalEnergy = gpuEnergy + cpuEnergy;
-  const rate = g? g.system.elec_rate_yuan_per_kwh : (c? c.elec_rate_yuan_per_kwh : 0.60);
+  const rate = (gpus[0]&&gpus[0].system)? gpus[0].system.elec_rate_yuan_per_kwh : (c? c.elec_rate_yuan_per_kwh : 0.60);
   const cost = totalEnergy/1000*rate;
 
   document.getElementById("ovPwr").textContent=fmt(totalPwr,0);
@@ -1049,10 +1118,10 @@ function renderOverview(){
   document.getElementById("ovCpuEnergy").textContent=fmt(cpuEnergy/1000,4);
   document.getElementById("ovCost").textContent="¥"+fmt(cost,4);
 
-  if(g){
-    document.getElementById("ovGpuUtil").textContent=g.utilization.gpu+"%";
-    setBar("ovGpuUtilB",g.utilization.gpu);
-    document.getElementById("ovGpuFlops").textContent=fmt(g.compute.effective_tflops,0);
+  if(gc){
+    document.getElementById("ovGpuUtil").textContent=ovGpuUtilVal.toFixed(1)+"%";
+    setBar("ovGpuUtilB",ovGpuUtilVal);
+    document.getElementById("ovGpuFlops").textContent=fmt(ovGpuFlopsVal,0);
   }
   if(c){
     document.getElementById("ovCpuUtil").textContent=(c.utilization||0)+"%";
@@ -1119,14 +1188,36 @@ function renderOverview(){
         }).join("");
     }
   }
+
+  // 集群算力总览 (多卡 GPU + 多路 CPU)
+  const gc2 = latestCluster||{};
+  const cc = (c&&c.cluster)||{};
+  const e2 = document.getElementById("clGpuCnt");
+  if(e2) e2.textContent = (gc2.gpu_count!=null? gc2.gpu_count : "--");
+  const en = document.getElementById("clGpuNames");
+  if(en) en.textContent = (gc2.gpu_names&&gc2.gpu_names.length)? gc2.gpu_names.join(", ") : "--";
+  const cs = document.getElementById("clCpuSockets");
+  if(cs) cs.textContent = (cc.sockets!=null? cc.sockets : "--");
+  const cco = document.getElementById("clCpuCores");
+  if(cco) cco.textContent = (cc.total_cores!=null? cc.total_cores : "--");
+  const cct = document.getElementById("clCpuThreads");
+  if(cct) cct.textContent = (cc.total_threads!=null? cc.total_threads : "--");
+  const ct = document.getElementById("clGpuTflopsV");
+  if(ct) ct.textContent = fmt(gc2.total_effective_tflops||0,1);
+  const totPeak = gc2.total_peak_tflops||0;
+  setBar("clGpuB", totPeak>0? (gc2.total_effective_tflops||0)/totPeak*100 : 0);
+  const ch = document.getElementById("clH100V");
+  if(ch) ch.textContent = fmt(gc2.h100_equiv_effective_tflops||0,1);
+  const hPeak = gc2.h100_equiv_peak_tflops||0;
+  setBar("clH100B", hPeak>0? (gc2.h100_equiv_effective_tflops||0)/hPeak*100 : 0);
 }
 
 /* ---------------- 图表绘制 (仅当前页) ---------------- */
 function drawActiveCharts(){
   if(activePage==="overview"){
     drawChart(document.getElementById("chartOvPwr"),[{data:H.totalPwr,color:"#7c3aed"}]);
-    drawChart(document.getElementById("chartOvSplit"),[{data:H.pwr,color:"#7c3aed"},{data:H.cpuPwr,color:"#2563eb"}]);
-    drawChart(document.getElementById("chartOvUtil"),[{data:H.gpu,color:"#7c3aed"},{data:H.cpuUtil,color:"#2563eb"},{data:H.memLoad,color:"#0891b2"}]);
+    drawChart(document.getElementById("chartOvSplit"),[{data:H.gpuPwrTot,color:"#7c3aed"},{data:H.cpuPwr,color:"#2563eb"}]);
+    drawChart(document.getElementById("chartOvUtil"),[{data:H.gpuUtilAvg,color:"#7c3aed"},{data:H.cpuUtil,color:"#2563eb"},{data:H.memLoad,color:"#0891b2"}]);
   } else if(activePage==="gpu"){
     drawChart(document.getElementById("chartFlops"),[{data:H.flops,color:"#7c3aed"}]);
     drawChart(document.getElementById("chartUtil"),[{data:H.gpu,color:"#2563eb"},{data:H.mem,color:"#0891b2"}]);
@@ -1193,6 +1284,25 @@ document.querySelectorAll(".hist-range").forEach(b=>b.addEventListener("click",(
 }));
 bindProcSort();
 
+/* ---------------- 多卡 GPU 选择器 ---------------- */
+function buildGpuSelect(){
+  const sel=document.getElementById("gpuSelect");
+  if(!sel) return;
+  if(!latestGpus||latestGpus.length===0){ sel.style.display="none"; return; }
+  sel.style.display = latestGpus.length>1 ? "inline-block" : "none";
+  const valid = Math.min(selectedGpuIdx, latestGpus.length-1);
+  sel.innerHTML = latestGpus.map((g,i)=>{
+    const nm = (g&&!g.error)? g.name : ("GPU "+i);
+    return `<option value="${i}">GPU ${i}: ${nm}</option>`;
+  }).join("");
+  sel.value = String(valid);
+}
+document.getElementById("gpuSelect").addEventListener("change",function(){
+  selectedGpuIdx=parseInt(this.value,10)||0;
+  const g=latestGpus[selectedGpuIdx];
+  if(g) renderGpu(g);
+});
+
 /* ---------------- 设置页 ---------------- */
 function renderSettings(){
   fetchJSON("/api/settings").then(d=>{
@@ -1211,8 +1321,6 @@ function renderSettings(){
     document.getElementById("setDaily").innerHTML = days.length
       ? days.map(([k,v])=>`<div class="row"><span class="k">${k}</span><span class="v">${(v/1000).toFixed(3)} 度</span></div>`).join("")
       : '<div class="row"><span class="k">暂无数据</span><span class="v">--</span></div>';
-    const cumH100 = document.getElementById("setCumH100");
-    if(cumH100) cumH100.textContent = (d.gpu_h100_hours!=null?d.gpu_h100_hours.toFixed(2):"--") + " H100·h";
   });
 }
 function setMsg(text, ok){
@@ -1263,7 +1371,13 @@ async function tick(){
     const [gj,cj,mj]=await Promise.all([
       fetchJSON("/api/metrics"), fetchJSON("/api/cpu"), fetchJSON("/api/memory")
     ]);
-    if(gj&&gj.gpus&&gj.gpus[0]) renderGpu(gj.gpus[0]);
+    if(gj&&gj.gpus){
+      latestGpus=gj.gpus;
+      latestCluster=gj.cluster||null;
+      buildGpuSelect();
+      const gi=Math.min(selectedGpuIdx, gj.gpus.length-1);
+      if(gj.gpus[gi]){ latestGpu=gj.gpus[gi]; renderGpu(latestGpu); }
+    }
     if(cj) renderCpu(cj);
     if(mj) renderMem(mj);
     renderOverview();
