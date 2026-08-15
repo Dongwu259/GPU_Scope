@@ -101,6 +101,21 @@
   .pill.c{background:rgba(124,58,237,.12);color:var(--violet)}
   .pill.g{background:#eef2f7;color:var(--muted)}
 
+  /* GPU 选择卡片网格 (多卡适配) */
+  .gpu-card{border:1px solid var(--line);border-radius:14px;padding:14px;background:var(--panel);box-shadow:var(--shadow);
+    transition:border-color .15s,box-shadow .15s;cursor:pointer;display:flex;flex-direction:column}
+  .gpu-card:hover{border-color:var(--accent);box-shadow:0 4px 14px rgba(37,99,235,.18)}
+  .gpu-card.idx-active{border-color:var(--accent);box-shadow:0 0 0 2px rgba(37,99,235,.28)}
+  .gpu-card-top{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+  .gpu-idx{font-size:11.5px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;font-variant-numeric:tabular-nums}
+  .gpu-ef{font-size:11px;color:var(--violet);font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .gpu-model{font-size:14.5px;font-weight:700;margin:6px 0 10px;line-height:1.3;min-height:38px;color:var(--ink)}
+  .gpu-metrics{display:flex;gap:16px;margin-bottom:9px}
+  .gpu-metric{display:flex;flex-direction:column;gap:1px}
+  .gpu-metric .k{font-size:11px;color:var(--muted)}
+  .gpu-metric .v{font-size:17px;font-weight:800;font-variant-numeric:tabular-nums}
+  .gpu-bars{display:flex;flex-direction:column;gap:5px;margin-top:auto}
+
   .kv{display:flex;flex-direction:column;gap:9px}
   .kv .row{display:flex;justify-content:space-between;align-items:center;font-size:13px}
   .kv .row .k{color:var(--muted)}
@@ -292,17 +307,20 @@
     <section id="page-gpu" class="page" hidden>
       <div class="page-head">
         <h2 id="gpuName">GPU 监测面板</h2>
-        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-          <div class="sub" id="gpuSub">正在连接 NVML …</div>
-          <select id="gpuSelect" class="input" style="width:auto;max-width:340px;padding:6px 10px;font-size:13px;display:none"></select>
-        </div>
+        <div class="sub" id="gpuSub">正在连接 NVML …</div>
       </div>
+
+      <!-- 选卡网格: 进入先看卡片, 点击进入对应 GPU 详情 (单卡只显示一张) -->
+      <div id="gpuCards" class="grid cards4" style="margin-bottom:14px"></div>
+
+      <!-- 详情 (已有详情页内容, 随选中卡片切换) -->
+      <div id="gpuDetail">
 
       <div class="grid hero" style="margin-bottom:14px">
         <div class="card">
           <h3>等效 AI 算力 <span class="tag">FP16/BF16 稠密 · 实时估算</span></h3>
           <div class="big"><span id="aiFlops">--</span><small>TFLOPS</small></div>
-          <div class="substat" id="aiCumH100">累计 H100 等效运行 <b>--</b></div>
+          <div class="substat" style="display:flex;gap:18px;flex-wrap:wrap"><span>累计 H100 等效运行 <b id="aiCumH100V">--</b> H100·h</span><span>实时 H100 等效算力 <b id="aiRealH100V" style="color:var(--violet)">--</b> H100·TFLOPS</span></div>
           <div id="ladder" class="ladder"></div>
           <div class="note">
             头条 = Tensor Core FP16/BF16 <b>稠密</b> 峰值 × GPU 利用率。视频生成(扩散模型)以张量核心矩阵乘为主，故以此作为等效 AI 算力。下方为各精度档位的理论峰值与当前有效值（峰值 × 利用率）。注意：NVIDIA 营销的 "1801 AI TOPS" 实为 <b>FP4 稀疏</b>，并非 FP16。估算基于规格表与硬件利用率计数器，非直接张量活跃度测量。
@@ -465,6 +483,8 @@
           单进程显存占用来自 Windows 性能计数器 (真实 MB)；SM/显存/编码/解码活跃度来自 NVML 每进程采样。仅显示真正占用 GPU 的进程。
         </div>
       </div>
+
+      </div><!-- /gpuDetail -->
     </section>
 
     <!-- ===================== CPU 页面 ===================== -->
@@ -825,12 +845,14 @@ function renderGpu(g){
   if(!g||g.error){ setStatus("err","NVML 数据异常"); return; }
   latestGpu=g;
   curFlops=g.compute.effective_tflops;
-  document.getElementById("gpuName").textContent=g.name;
-  document.getElementById("gpuSub").textContent=`驱动 ${g.driver} · CUDA ${g.cuda} · ${g.spec.arch} · ${g.spec.cuda_cores} CUDA 核 · ${g.spec.tensor_cores} Tensor 核`;
+  // 页标题/副标题改由 buildGpuCards 维护 (集群视角); 此处仅保留选中卡的 GPU 型号简述
+  document.getElementById("gpuSub").textContent=`选中 GPU ${selectedGpuIdx} · 驱动 ${g.driver} · CUDA ${g.cuda} · ${g.spec.arch} · ${g.spec.cuda_cores} CUDA 核 · ${g.spec.tensor_cores} Tensor 核`;
 
   document.getElementById("aiFlops").textContent=fmt(curFlops,1);
   const cumH100 = g.system ? g.system.gpu_h100_hours_cum : null;
-  document.getElementById("aiCumH100").innerHTML = "累计 H100 等效运行 <b>" + (cumH100!=null?fmt(cumH100,2):"--") + " H100·h</b>";
+  document.getElementById("aiCumH100V").textContent = (cumH100!=null?fmt(cumH100,2):"--");
+  const realH100 = g.compute ? g.compute.h100_equiv_effective_tflops : null;
+  document.getElementById("aiRealH100V").textContent = (realH100!=null?fmt(realH100,1):"--");
   const lad=g.compute.ladder||[];
   const maxPeak=Math.max(...lad.map(x=>x.peak_tflops),1);
   document.getElementById("ladder").innerHTML=lad.map(x=>{
@@ -1284,24 +1306,50 @@ document.querySelectorAll(".hist-range").forEach(b=>b.addEventListener("click",(
 }));
 bindProcSort();
 
-/* ---------------- 多卡 GPU 选择器 ---------------- */
-function buildGpuSelect(){
-  const sel=document.getElementById("gpuSelect");
-  if(!sel) return;
-  if(!latestGpus||latestGpus.length===0){ sel.style.display="none"; return; }
-  sel.style.display = latestGpus.length>1 ? "inline-block" : "none";
-  const valid = Math.min(selectedGpuIdx, latestGpus.length-1);
-  sel.innerHTML = latestGpus.map((g,i)=>{
-    const nm = (g&&!g.error)? g.name : ("GPU "+i);
-    return `<option value="${i}">GPU ${i}: ${nm}</option>`;
+/* ---------------- 多卡 GPU 选择卡片 ---------------- */
+// 进入 GPU 页面先看卡片网格; 点击卡片进入对应详情 (单卡只显示一张卡片)
+function buildGpuCards(){
+  const box=document.getElementById("gpuCards");
+  if(!box) return;
+  const n = (latestGpus&&latestGpus.length)||0;
+  // 页标题 (集群视角, 不被单卡详情覆盖)
+  const title=document.getElementById("gpuName");
+  if(title) title.textContent = n>1 ? `GPU 监测面板 · 共 ${n} 张卡` : "GPU 监测面板";
+  if(n===0){ box.style.display="none"; box.innerHTML=""; return; }
+  box.style.display="grid";
+  if(selectedGpuIdx>n-1) selectedGpuIdx=n-1;
+  box.innerHTML = latestGpus.map((g,i)=>{
+    const err = g&&g.error;
+    const nm = err ? ("GPU "+i) : (g.name||("GPU "+i));
+    const u = err ? null : (g.utilization&&g.utilization.gpu);
+    const mu = err ? null : (g.utilization&&g.utilization.memory);
+    const ef = (g&&!err&&g.compute) ? g.compute.h100_equiv_effective_tflops : null;
+    const active = (i===selectedGpuIdx) ? " idx-active" : "";
+    return `<div class="gpu-card${active}" data-idx="${i}">
+      <div class="gpu-card-top">
+        <span class="gpu-idx">GPU ${i}</span>
+        <span class="gpu-ef">${ef!=null? fmt(ef,1)+" H100·TFLOPS" : "--"}</span>
+      </div>
+      <div class="gpu-model">${nm}</div>
+      <div class="gpu-metrics">
+        <div class="gpu-metric"><span class="k">核心利用率</span><span class="v">${u!=null? u+"%" : "--"}</span></div>
+        <div class="gpu-metric"><span class="k">显存利用率</span><span class="v">${mu!=null? mu+"%" : "--"}</span></div>
+      </div>
+      <div class="gpu-bars">
+        <div class="bar"><i class="b-acc" style="width:${u!=null?u:0}%"></i></div>
+        <div class="bar"><i class="b-mem" style="width:${mu!=null?mu:0}%"></i></div>
+      </div>
+    </div>`;
   }).join("");
-  sel.value = String(valid);
+  box.querySelectorAll(".gpu-card").forEach(c=>{
+    c.addEventListener("click",()=>{
+      selectedGpuIdx=parseInt(c.dataset.idx,10)||0;
+      buildGpuCards();  // 立即高亮
+      const g=latestGpus[selectedGpuIdx];
+      if(g) renderGpu(g);
+    });
+  });
 }
-document.getElementById("gpuSelect").addEventListener("change",function(){
-  selectedGpuIdx=parseInt(this.value,10)||0;
-  const g=latestGpus[selectedGpuIdx];
-  if(g) renderGpu(g);
-});
 
 /* ---------------- 设置页 ---------------- */
 function renderSettings(){
@@ -1374,7 +1422,7 @@ async function tick(){
     if(gj&&gj.gpus){
       latestGpus=gj.gpus;
       latestCluster=gj.cluster||null;
-      buildGpuSelect();
+      buildGpuCards();
       const gi=Math.min(selectedGpuIdx, gj.gpus.length-1);
       if(gj.gpus[gi]){ latestGpu=gj.gpus[gi]; renderGpu(latestGpu); }
     }

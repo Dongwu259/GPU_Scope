@@ -724,6 +724,9 @@ class Monitor:
                 "headline_key": "fp16_tc_dense",
                 "headline_label": "FP16/BF16 Tensor 稠密",
                 "effective_tflops": round(spec["tensor_fp16_dense_tflops"] * gpu_u / 100.0, 2),
+                # 实时 H100 等效算力 = 该卡有效算力 × 相对 H100 的算力系数 (前端 GPU 卡片/详情展示用)
+                "h100_equiv_effective_tflops": round(
+                    spec["tensor_fp16_dense_tflops"] * gpu_u / 100.0 * h100_factor(name), 2),
                 "peak_tflops": spec["tensor_fp16_dense_tflops"],
                 "effective_fp32_live_tflops": round(live_fp32, 2),
                 # 兼容旧字段 (已修正: 旧 effective_tensor_tflops 实为 FP8 稀疏档)
