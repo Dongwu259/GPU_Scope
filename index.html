@@ -490,10 +490,15 @@
     <!-- ===================== CPU 页面 ===================== -->
     <section id="page-cpu" class="page" hidden>
       <div class="page-head">
-        <h2>CPU 监测</h2>
+        <h2 id="cpuPageTitle">CPU 监测面板</h2>
         <div class="sub" id="cpuName2">正在采集 …</div>
       </div>
       <div class="note" id="cpuLhmNote" style="margin-bottom:14px"></div>
+
+      <!-- 选卡网格: 进入先看卡片, 点击进入对应 CPU 详情 (单 CPU 只显示一张) -->
+      <div id="cpuCards" class="grid cards4" style="margin-bottom:14px"></div>
+
+      <div id="cpuDetail">
 
       <div class="grid hero" style="margin-bottom:14px">
         <div class="card">
@@ -545,11 +550,6 @@
       </div>
 
       <div class="card" style="margin-bottom:14px">
-        <h3>多路 CPU 明细 <span class="tag" id="cpuSocketTag">--</span></h3>
-        <div class="grid cards4" id="cpuSockets" style="grid-template-columns:repeat(auto-fill,minmax(190px,1fr))"></div>
-      </div>
-
-      <div class="card" style="margin-bottom:14px">
         <h3>能耗与电费 <span class="tag">持久化累计</span></h3>
         <div class="kv">
           <div class="row"><span class="k">累计耗电量 (CPU 估算)</span><span class="v" id="cpuEnergy">--</span></div>
@@ -573,6 +573,8 @@
           <canvas id="chartCpuFreq"></canvas>
         </div>
       </div>
+
+      </div><!-- /cpuDetail -->
     </section>
 
     <!-- ===================== 内存 页面 ===================== -->
@@ -789,7 +791,7 @@ const H = { flops:[], gpu:[], mem:[], pwr:[], tmp:[], smclk:[], memclk:[], enc:[
             gpuPwrTot:[], gpuUtilAvg:[] };
 let activePage = "overview";
 let curFlops = null, latestCpu = null, latestMem = null;
-let latestGpu = null, latestGpus = [], latestCluster = null, selectedGpuIdx = 0;
+let latestGpu = null, latestGpus = [], latestCluster = null, selectedGpuIdx = 0, selectedCpuIdx = 0;
 let procData = [], procSort = {key: "vram_mb", dir: -1};
 let histRange = "24h";
 let Hh = {pwrG:[],pwrC:[],pwrT:[],uG:[],uC:[],tG:[],tC:[],eTot:[],cost:[],netRx:[],netTx:[],diskRd:[],diskWr:[]};
@@ -799,23 +801,131 @@ function fmt(n,d=2){ return (n==null||isNaN(n))?"--":Number(n).toFixed(d); }
 function pct(n){ return (n==null||isNaN(n))?"--":n+"%"; }
 function na(v){ return (v==null)?"N/A":v; }
 
+const chartMeta = {};   // canvas.id -> {series, w, h, maxV, padL, padR, padT, padB, cw, ch, dpr}
+const hoverX = {};      // canvas.id -> 鼠标 x 像素 (plot 坐标系内) 或 null
+
+function fmtAxis(v){
+  if(v==null||isNaN(v)) return "";
+  const a=Math.abs(v);
+  if(a>=1000) return v.toFixed(0);
+  if(a>=10)  return v.toFixed(1);
+  if(a>=1)   return v.toFixed(2);
+  return v.toFixed(2);
+}
+function roundRect(ctx,x,y,w,h,r){
+  r=Math.min(r,w/2,h/2);
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+}
+
 function drawChart(canvas, series){
   if(!canvas) return;
   const dpr=window.devicePixelRatio||1, w=canvas.clientWidth, h=canvas.clientHeight;
   if(w===0||h===0) return; // 隐藏页不绘制
   canvas.width=w*dpr; canvas.height=h*dpr;
-  const ctx=canvas.getContext("2d"); ctx.scale(dpr,dpr); ctx.clearRect(0,0,w,h);
-  ctx.strokeStyle="#eef2f7"; ctx.lineWidth=1;
-  for(let i=0;i<=3;i++){ const y=h*i/3; ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(w,y);ctx.stroke(); }
-  let maxV=1; series.forEach(s=>s.data.forEach(v=>{ if(v!=null&&isFinite(v)) maxV=Math.max(maxV,v); })); maxV*=1.15;
+  const ctx=canvas.getContext("2d");
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,w,h);
+
+  const padL=44, padR=10, padT=14, padB=14;
+  const cw=w-padL-padR, ch=h-padT-padB;
+  let maxV=1;
+  series.forEach(s=>s.data.forEach(v=>{ if(v!=null&&isFinite(v)) maxV=Math.max(maxV,v); }));
+  maxV*=1.15;
+
+  // 公共单位 (全部 series 单位一致时, 在 y 轴顶部标注)
+  let commonUnit=null;
+  const units=series.map(s=>s.unit||"");
+  if(units.length && units.every(u=>u===units[0]) && units[0]!=="") commonUnit=units[0];
+
+  // y 轴网格 + 刻度数值
+  ctx.strokeStyle="#eef2f7"; ctx.lineWidth=1; ctx.fillStyle="#94a3b8"; ctx.font="10px sans-serif";
+  ctx.textAlign="right"; ctx.textBaseline="middle";
+  const ticks=3;
+  for(let i=0;i<=ticks;i++){
+    const y=padT+ch*i/ticks;
+    ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(w-padR,y); ctx.stroke();
+    const val=maxV*(1-i/ticks);
+    ctx.fillText(fmtAxis(val), padL-5, y);
+  }
+  if(commonUnit){ ctx.textAlign="left"; ctx.textBaseline="alphabetic"; ctx.fillStyle="#94a3b8";
+    ctx.fillText(commonUnit, padL+2, padT-3); }
+
+  // 折线 (按各自数据长度映射到整宽, 兼容历史 > MAXPTS 点)
   series.forEach(s=>{
     const d=s.data; if(d.length<2) return;
+    const n=d.length;
     ctx.strokeStyle=s.color; ctx.lineWidth=2; ctx.beginPath();
-    for(let i=0;i<d.length;i++){ const x=w*(i/(MAXPTS-1)), y=h-(d[i]==null?0:d[i])/maxV*h; i?ctx.lineTo(x,y):ctx.moveTo(x,y); }
+    for(let i=0;i<n;i++){ const x=padL+cw*(i/(n-1)), y=padT+ch-(d[i]==null?0:d[i])/maxV*ch; i?ctx.lineTo(x,y):ctx.moveTo(x,y); }
     ctx.stroke();
-    const last=d[d.length-1];
-    if(last!=null){ const x=w*((d.length-1)/(MAXPTS-1)), y=h-last/maxV*h; ctx.fillStyle=s.color; ctx.beginPath();ctx.arc(x,y,3,0,Math.PI*2);ctx.fill(); }
+    const last=d[n-1];
+    if(last!=null){ const x=padL+cw*1, y=padT+ch-last/maxV*ch; ctx.fillStyle=s.color; ctx.beginPath();ctx.arc(x,y,3,0,Math.PI*2);ctx.fill(); }
   });
+
+  chartMeta[canvas.id]={series, w, h, maxV, padL, padR, padT, padB, cw, ch, dpr};
+  if(hoverX[canvas.id]!=null) drawHover(canvas);
+
+  if(!canvas._hooked){
+    canvas._hooked=true;
+    canvas.addEventListener("mousemove",e=>{
+      const r=canvas.getBoundingClientRect();
+      hoverX[canvas.id]=e.clientX-r.left;
+      redrawChart(canvas);
+    });
+    canvas.addEventListener("mouseleave",()=>{ hoverX[canvas.id]=null; redrawChart(canvas); });
+  }
+}
+
+function redrawChart(canvas){
+  const m=chartMeta[canvas.id];
+  if(m) drawChart(canvas, m.series);
+}
+
+// 鼠标悬浮: 竖直参考线 + 各 series 在该时刻的数值 (带单位)
+function drawHover(canvas){
+  const m=chartMeta[canvas.id]; if(!m) return;
+  const ctx=canvas.getContext("2d");
+  ctx.setTransform(m.dpr,0,0,m.dpr,0,0);
+  const {padL,padR,padT,cw,ch,maxV,w,series}=m;
+  const px=hoverX[canvas.id];
+  const n0=series[0]?series[0].data.length:0;
+  if(n0<=0) return;
+  let idx=Math.round((px-padL)/cw*(n0-1));
+  idx=Math.max(0,Math.min(n0-1,idx));
+  const x=padL+cw*(idx/(n0-1));
+  ctx.save();
+  // 竖直参考线
+  ctx.strokeStyle="rgba(100,116,139,0.55)"; ctx.lineWidth=1; ctx.setLineDash([4,3]);
+  ctx.beginPath(); ctx.moveTo(x,padT); ctx.lineTo(x,padT+ch); ctx.stroke(); ctx.setLineDash([]);
+  // 收集该 idx 各线数值
+  const lines=[];
+  series.forEach(s=>{
+    const d=s.data; if(idx>=d.length) return;
+    const v=d[idx]; if(v==null) return;
+    const y=padT+ch-v/maxV*ch;
+    ctx.fillStyle=s.color; ctx.beginPath(); ctx.arc(x,y,3.5,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle="#fff"; ctx.lineWidth=1.5; ctx.stroke();
+    const dec=(s.dec!=null)?s.dec:1;
+    const unit=s.unit||"";
+    lines.push({name:s.name||"", val:(typeof v==="number"?v.toFixed(dec):v)+(unit?" "+unit:""), color:s.color});
+  });
+  if(lines.length){
+    ctx.font="11px sans-serif"; ctx.textAlign="left"; ctx.textBaseline="top";
+    let bw=0; lines.forEach(l=>{ bw=Math.max(bw, ctx.measureText((l.name?l.name+"  ":"")+l.val).width); });
+    bw+=20; const bh=lines.length*16+10;
+    let bx=x+10; if(bx+bw> w-padR) bx=x-10-bw;
+    let by=padT+4;
+    ctx.fillStyle="rgba(255,255,255,0.97)"; ctx.strokeStyle="#cbd5e1"; ctx.lineWidth=1;
+    roundRect(ctx,bx,by,bw,bh,7); ctx.fill(); ctx.stroke();
+    lines.forEach((l,i)=>{
+      const ly=by+8+i*16;
+      ctx.fillStyle=l.color; roundRect(ctx,bx+8,ly-4,9,9,2); ctx.fill();
+      ctx.fillStyle="#1e293b"; ctx.textBaseline="middle";
+      ctx.fillText((l.name?l.name+"  ":"")+l.val, bx+22, ly);
+    });
+  }
+  ctx.restore();
 }
 function pushHist(){
   H.flops.push(curFlops); H.gpu.push(latestGpu?latestGpu.utilization.gpu:null); H.mem.push(latestGpu?latestGpu.utilization.memory:null);
@@ -997,7 +1107,21 @@ function bindProcSort(){
 function renderCpu(d){
   if(!d||d.error){ document.getElementById("cpuName2").textContent="CPU 监控不可用 (psutil 未安装)"; return; }
   latestCpu=d;
-  document.getElementById("cpuName2").textContent=`${d.name||"CPU"} · ${d.cores}核/${d.threads}线程 · 最高 ${d.max_mhz} MHz`;
+
+  const cpuSocks=(d.sockets&&d.sockets.length)?d.sockets:null;
+  const cpuN=cpuSocks?cpuSocks.length:1;
+  if(selectedCpuIdx>cpuN-1) selectedCpuIdx=cpuN-1;
+  buildCpuCards();                       // 顶部选卡网格 (多 CPU 适配)
+  const cs=cpuSocks?cpuSocks[selectedCpuIdx]:d;
+  const csName=cs.name||d.name||"CPU";
+  const csCores=(cs.cores!=null)?cs.cores:d.cores;
+  const csThreads=(cs.threads!=null)?cs.threads:d.threads;
+  const csTdp=(cs.tdp_w!=null)?cs.tdp_w:d.tdp_w;
+  const csUtil=(cs.utilization!=null)?cs.utilization:(d.utilization||0);
+  const csPw=(cs.power_w!=null)?cs.power_w:d.power_w;
+  const cpt=document.getElementById("cpuPageTitle");
+  if(cpt) cpt.textContent = cpuN>1?`CPU 监测面板 · 共 ${cpuN} 路`:"CPU 监测面板";
+  document.getElementById("cpuName2").textContent=(cpuN>1?`CPU ${selectedCpuIdx} · `:"")+`${csName} · ${csCores}核/${csThreads}线程`+(cpuN>1?` · TDP ${csTdp} W`:` · 最高 ${d.max_mhz} MHz`);
   const c=d.compute;
   document.getElementById("cpuGflops").textContent=fmt(c.avx512_effective_gflops,0);
   const maxPeak=Math.max(c.avx2_peak_gflops,c.avx512_peak_gflops,1);
@@ -1014,9 +1138,9 @@ function renderCpu(d){
            `<span class="val">有效 ${fmt(x.eff,1)} / 峰值 ${fmt(x.peak,1)} GFLOPS</span></div>`;
   }).join("");
 
-  const u=d.utilization||0, pw=d.power_w, tmp=d.temperature_c, volt=d.voltage_v;
+  const u=csUtil, pw=csPw, tmp=d.temperature_c, volt=d.voltage_v;
   document.getElementById("cpuUtilV").textContent=u+"%"; setBar("cpuUtilB",u);
-  document.getElementById("cpuPwrV").textContent=pw!=null?(pw+" W"):"--"; setBar("cpuPwrB",(pw&&d.tdp_w)?Math.min(100,pw/(d.tdp_w*1.3)*100):0);
+  document.getElementById("cpuPwrV").textContent=pw!=null?(pw+" W"):"--"; setBar("cpuPwrB",(pw&&csTdp)?Math.min(100,pw/(csTdp*1.3)*100):0);
   const lhmAvail = !!(d.lhm && d.lhm.available);
   if(tmp==null){ document.getElementById("cpuTmpV").textContent="N/A"; setBar("cpuTmpB",0);
     const ts=document.getElementById("cpuTmpStatus"); ts.textContent="N/A (无传感器)"; ts.className="v warn"; }
@@ -1034,8 +1158,8 @@ function renderCpu(d){
     if(pn){ pn.textContent=psrc; pn.className="v "+cls; }
     if(pn2){ pn2.textContent=psrc; pn2.className="v "+cls; } }
   document.getElementById("cpuArch").textContent=(d.name||"").includes("Intel")?"Intel x86-64":((d.name||"").includes("AMD")?"AMD x86-64":"x86-64");
-  document.getElementById("cpuCT").textContent=`${d.cores}/${d.threads}`;
-  document.getElementById("cpuTdp").textContent=d.tdp_w;
+  document.getElementById("cpuCT").textContent=`${csCores}/${csThreads}`;
+  document.getElementById("cpuTdp").textContent=csTdp;
   document.getElementById("cpuAvx2Eff").textContent=fmt(c.avx2_effective_gflops,0)+" GFLOPS";
 
   document.getElementById("cpuEnergy").textContent=(d.energy_kwh!=null)?(`${d.energy_kwh} 度 (${d.energy_wh} Wh)`):"--";
@@ -1052,28 +1176,47 @@ function renderCpu(d){
     if(b){ b.style.height=Math.max(2,u2/100*90)+"px";
       b.style.background = u2>85?"var(--red)":(u2>50?"var(--amber)":"var(--accent)"); }
     if(p){ p.textContent=Math.round(u2)+"%"; } });
+}
 
-  // 多路 CPU 明细
-  const socks = d.sockets||[];
-  const tag = document.getElementById("cpuSocketTag");
-  if(tag) tag.textContent = socks.length>0? (socks.length+" 路") : "--";
-  const stEl = document.getElementById("cpuSockets");
-  if(stEl){
-    if(socks.length){
-      stEl.innerHTML = socks.map((s,i)=>{
-        const u = s.utilization||0;
-        const pw = (s.power_w!=null)? s.power_w : "--";
-        return `<div class="metric" style="padding:10px;border:1px solid var(--line);border-radius:10px">
-          <div class="label"><span>CPU ${i} · ${(s.name||"").slice(0,26)}</span><span>${u}%</span></div>
-          <div class="val" style="font-size:18px">${pw} <small>W</small></div>
-          <div class="bar"><i class="b-acc" style="width:${u}%"></i></div>
-          <div class="note" style="margin-top:6px">${s.cores||"?"} 核 / ${s.threads||"?"} 线程 · TDP ${s.tdp_w||"?"} W</div>
-        </div>`;
-      }).join("");
-    } else {
-      stEl.innerHTML = "";
-    }
-  }
+/* ---------------- CPU 选卡网格 (多 CPU 适配) ---------------- */
+function buildCpuCards(){
+  const box=document.getElementById("cpuCards");
+  if(!box) return;
+  const d=latestCpu;
+  const socks=(d&&d.sockets&&d.sockets.length)?d.sockets:null;
+  const items=socks? socks : (d? [d] : []);
+  const n=items.length;
+  if(n===0){ box.style.display="none"; box.innerHTML=""; return; }
+  box.style.display="grid";
+  if(selectedCpuIdx>n-1) selectedCpuIdx=n-1;
+  box.innerHTML=items.map((s,i)=>{
+    const nm=s.name||("CPU "+i);
+    const u=(s.utilization!=null)?s.utilization:null;
+    const pw=(s.power_w!=null)?s.power_w:null;
+    const cores=(s.cores!=null)?s.cores:(d?d.cores:"?");
+    const threads=(s.threads!=null)?s.threads:(d?d.threads:"?");
+    const active=(i===selectedCpuIdx)?" idx-active":"";
+    return `<div class="gpu-card${active}" data-idx="${i}">
+      <div class="gpu-card-top">
+        <span class="gpu-idx">CPU ${i}</span>
+        <span class="gpu-ef">${pw!=null? fmt(pw,0)+" W" : "--"}</span>
+      </div>
+      <div class="gpu-model">${nm}</div>
+      <div class="gpu-metrics">
+        <div class="gpu-metric"><span class="k">核心利用率</span><span class="v">${u!=null? u+"%" : "--"}</span></div>
+        <div class="gpu-metric"><span class="k">核心 / 线程</span><span class="v" style="font-size:13px">${cores} / ${threads}</span></div>
+      </div>
+      <div class="gpu-bars">
+        <div class="bar"><i class="b-acc" style="width:${u!=null?u:0}%"></i></div>
+      </div>
+    </div>`;
+  }).join("");
+  box.querySelectorAll(".gpu-card").forEach(c=>{
+    c.addEventListener("click",()=>{
+      selectedCpuIdx=parseInt(c.dataset.idx,10)||0;
+      if(latestCpu) renderCpu(latestCpu);
+    });
+  });
 }
 
 /* ---------------- 内存 渲染 ---------------- */
@@ -1237,32 +1380,32 @@ function renderOverview(){
 /* ---------------- 图表绘制 (仅当前页) ---------------- */
 function drawActiveCharts(){
   if(activePage==="overview"){
-    drawChart(document.getElementById("chartOvPwr"),[{data:H.totalPwr,color:"#7c3aed"}]);
-    drawChart(document.getElementById("chartOvSplit"),[{data:H.gpuPwrTot,color:"#7c3aed"},{data:H.cpuPwr,color:"#2563eb"}]);
-    drawChart(document.getElementById("chartOvUtil"),[{data:H.gpuUtilAvg,color:"#7c3aed"},{data:H.cpuUtil,color:"#2563eb"},{data:H.memLoad,color:"#0891b2"}]);
+    drawChart(document.getElementById("chartOvPwr"),[{data:H.totalPwr,name:"整机功率",unit:" W",dec:0,color:"#7c3aed"}]);
+    drawChart(document.getElementById("chartOvSplit"),[{data:H.gpuPwrTot,name:"GPU",unit:" W",dec:0,color:"#7c3aed"},{data:H.cpuPwr,name:"CPU",unit:" W",dec:0,color:"#2563eb"}]);
+    drawChart(document.getElementById("chartOvUtil"),[{data:H.gpuUtilAvg,name:"GPU",unit:"%",dec:1,color:"#7c3aed"},{data:H.cpuUtil,name:"CPU",unit:"%",dec:1,color:"#2563eb"},{data:H.memLoad,name:"内存",unit:"%",dec:1,color:"#0891b2"}]);
   } else if(activePage==="gpu"){
-    drawChart(document.getElementById("chartFlops"),[{data:H.flops,color:"#7c3aed"}]);
-    drawChart(document.getElementById("chartUtil"),[{data:H.gpu,color:"#2563eb"},{data:H.mem,color:"#0891b2"}]);
-    drawChart(document.getElementById("chartPwr"),[{data:H.pwr,color:"#f59e0b"},{data:H.tmp,color:"#dc2626"}]);
-    drawChart(document.getElementById("chartClk"),[{data:H.smclk,color:"#2563eb"},{data:H.memclk,color:"#0891b2"}]);
-    drawChart(document.getElementById("chartMedia"),[{data:H.enc,color:"#7c3aed"},{data:H.dec,color:"#16a34a"}]);
-    drawChart(document.getElementById("chartBw"),[{data:H.bw,color:"#0ea5e9"}]);
+    drawChart(document.getElementById("chartFlops"),[{data:H.flops,name:"等效算力",unit:" TFLOPS",dec:1,color:"#7c3aed"}]);
+    drawChart(document.getElementById("chartUtil"),[{data:H.gpu,name:"GPU 利用率",unit:"%",dec:1,color:"#2563eb"},{data:H.mem,name:"显存活动",unit:"%",dec:1,color:"#0891b2"}]);
+    drawChart(document.getElementById("chartPwr"),[{data:H.pwr,name:"功率",unit:" W",dec:0,color:"#f59e0b"},{data:H.tmp,name:"温度",unit:" °C",dec:1,color:"#dc2626"}]);
+    drawChart(document.getElementById("chartClk"),[{data:H.smclk,name:"SM 时钟",unit:" MHz",dec:0,color:"#2563eb"},{data:H.memclk,name:"显存时钟",unit:" MHz",dec:0,color:"#0891b2"}]);
+    drawChart(document.getElementById("chartMedia"),[{data:H.enc,name:"NVENC",unit:"%",dec:1,color:"#7c3aed"},{data:H.dec,name:"NVDEC",unit:"%",dec:1,color:"#16a34a"}]);
+    drawChart(document.getElementById("chartBw"),[{data:H.bw,name:"带宽",unit:" GB/s",dec:1,color:"#0ea5e9"}]);
   } else if(activePage==="cpu"){
-    drawChart(document.getElementById("chartCpuUtil"),[{data:H.cpuUtil,color:"#2563eb"}]);
-    drawChart(document.getElementById("chartCpuPwr"),[{data:H.cpuPwr,color:"#f59e0b"}]);
-    drawChart(document.getElementById("chartCpuFreq"),[{data:H.cpuFreq,color:"#7c3aed"}]);
+    drawChart(document.getElementById("chartCpuUtil"),[{data:H.cpuUtil,name:"CPU 利用率",unit:"%",dec:1,color:"#2563eb"}]);
+    drawChart(document.getElementById("chartCpuPwr"),[{data:H.cpuPwr,name:"CPU 功率",unit:" W",dec:0,color:"#f59e0b"}]);
+    drawChart(document.getElementById("chartCpuFreq"),[{data:H.cpuFreq,name:"频率",unit:" MHz",dec:0,color:"#7c3aed"}]);
   } else if(activePage==="mem"){
-    drawChart(document.getElementById("chartMemPct"),[{data:H.memPct,color:"#0891b2"}]);
-    drawChart(document.getElementById("chartMemPcie"),[{data:H.memRd,color:"#2563eb"},{data:H.memWr,color:"#0891b2"}]);
-    drawChart(document.getElementById("chartMemLoad"),[{data:H.memLoad,color:"#f59e0b"}]);
+    drawChart(document.getElementById("chartMemPct"),[{data:H.memPct,name:"内存占用",unit:"%",dec:1,color:"#0891b2"}]);
+    drawChart(document.getElementById("chartMemPcie"),[{data:H.memRd,name:"读",unit:" MB/s",dec:0,color:"#2563eb"},{data:H.memWr,name:"写",unit:" MB/s",dec:0,color:"#0891b2"}]);
+    drawChart(document.getElementById("chartMemLoad"),[{data:H.memLoad,name:"提交负载",unit:"%",dec:1,color:"#f59e0b"}]);
   } else if(activePage==="history"){
-    drawChart(document.getElementById("chartHistPwr"),[{data:Hh.pwrG,color:"#7c3aed"},{data:Hh.pwrC,color:"#2563eb"},{data:Hh.pwrT,color:"#16a34a"}]);
-    drawChart(document.getElementById("chartHistUtil"),[{data:Hh.uG,color:"#7c3aed"},{data:Hh.uC,color:"#2563eb"}]);
-    drawChart(document.getElementById("chartHistTmp"),[{data:Hh.tG,color:"#dc2626"},{data:Hh.tC,color:"#f59e0b"}]);
-    drawChart(document.getElementById("chartHistEnergy"),[{data:Hh.eTot,color:"#0891b2"}]);
-    drawChart(document.getElementById("chartHistCost"),[{data:Hh.cost,color:"#16a34a"}]);
-    drawChart(document.getElementById("chartHistNet"),[{data:Hh.netRx,color:"#0891b2"},{data:Hh.netTx,color:"#7c3aed"}]);
-    drawChart(document.getElementById("chartHistDisk"),[{data:Hh.diskRd,color:"#2563eb"},{data:Hh.diskWr,color:"#16a34a"}]);
+    drawChart(document.getElementById("chartHistPwr"),[{data:Hh.pwrG,name:"GPU",unit:" W",dec:0,color:"#7c3aed"},{data:Hh.pwrC,name:"CPU",unit:" W",dec:0,color:"#2563eb"},{data:Hh.pwrT,name:"整机",unit:" W",dec:0,color:"#16a34a"}]);
+    drawChart(document.getElementById("chartHistUtil"),[{data:Hh.uG,name:"GPU",unit:"%",dec:1,color:"#7c3aed"},{data:Hh.uC,name:"CPU",unit:"%",dec:1,color:"#2563eb"}]);
+    drawChart(document.getElementById("chartHistTmp"),[{data:Hh.tG,name:"GPU",unit:" °C",dec:1,color:"#dc2626"},{data:Hh.tC,name:"CPU",unit:" °C",dec:1,color:"#f59e0b"}]);
+    drawChart(document.getElementById("chartHistEnergy"),[{data:Hh.eTot,name:"累计能耗",unit:" kWh",dec:2,color:"#0891b2"}]);
+    drawChart(document.getElementById("chartHistCost"),[{data:Hh.cost,name:"电费",unit:" ¥",dec:2,color:"#16a34a"}]);
+    drawChart(document.getElementById("chartHistNet"),[{data:Hh.netRx,name:"收",unit:" MB/s",dec:0,color:"#0891b2"},{data:Hh.netTx,name:"发",unit:" MB/s",dec:0,color:"#7c3aed"}]);
+    drawChart(document.getElementById("chartHistDisk"),[{data:Hh.diskRd,name:"读",unit:" MB/s",dec:0,color:"#2563eb"},{data:Hh.diskWr,name:"写",unit:" MB/s",dec:0,color:"#16a34a"}]);
   }
 }
 
