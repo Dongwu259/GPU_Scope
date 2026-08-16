@@ -259,7 +259,7 @@
         </div>
         <div class="card metric">
           <div class="label"><span>集群 H100 等效 (有效)</span><span id="clH100">--</span></div>
-          <div class="val"><span id="clH100V">--</span><small>H100·TFLOPS</small></div>
+          <div class="val"><span id="clH100V">--</span><small>×H100</small></div>
           <div class="bar"><i class="b-violet" id="clH100B" style="width:0%;background:var(--violet)"></i></div>
         </div>
       </div>
@@ -320,7 +320,7 @@
         <div class="card">
           <h3>等效 AI 算力 <span class="tag">FP16/BF16 稠密 · 实时估算</span></h3>
           <div class="big"><span id="aiFlops">--</span><small>TFLOPS</small></div>
-          <div class="substat" style="display:flex;gap:18px;flex-wrap:wrap"><span>累计 H100 等效运行 <b id="aiCumH100V">--</b> H100·h</span><span>实时 H100 等效算力 <b id="aiRealH100V" style="color:var(--violet)">--</b> H100·TFLOPS</span></div>
+          <div class="substat" style="display:flex;gap:18px;flex-wrap:wrap"><span>累计 H100 等效运行 <b id="aiCumH100V">--</b> H100·h</span><span>实时 H100 等效算力 <b id="aiRealH100V" style="color:var(--violet)">--</b> ×H100</span></div>
           <div id="ladder" class="ladder"></div>
           <div class="note">
             头条 = Tensor Core FP16/BF16 <b>稠密</b> 峰值 × GPU 利用率。视频生成(扩散模型)以张量核心矩阵乘为主，故以此作为等效 AI 算力。下方为各精度档位的理论峰值与当前有效值（峰值 × 利用率）。注意：NVIDIA 营销的 "1801 AI TOPS" 实为 <b>FP4 稀疏</b>，并非 FP16。估算基于规格表与硬件利用率计数器，非直接张量活跃度测量。
@@ -962,7 +962,7 @@ function renderGpu(g){
   const cumH100 = g.system ? g.system.gpu_h100_hours_cum : null;
   document.getElementById("aiCumH100V").textContent = (cumH100!=null?fmt(cumH100,2):"--");
   const realH100 = g.compute ? g.compute.h100_equiv_effective_tflops : null;
-  document.getElementById("aiRealH100V").textContent = (realH100!=null?fmt(realH100,1):"--");
+  document.getElementById("aiRealH100V").textContent = (realH100!=null?fmt(realH100,2):"--");
   const lad=g.compute.ladder||[];
   const maxPeak=Math.max(...lad.map(x=>x.peak_tflops),1);
   document.getElementById("ladder").innerHTML=lad.map(x=>{
@@ -1372,7 +1372,7 @@ function renderOverview(){
   const totPeak = gc2.total_peak_tflops||0;
   setBar("clGpuB", totPeak>0? (gc2.total_effective_tflops||0)/totPeak*100 : 0);
   const ch = document.getElementById("clH100V");
-  if(ch) ch.textContent = fmt(gc2.h100_equiv_effective_tflops||0,1);
+  if(ch) ch.textContent = fmt(gc2.h100_equiv_effective_tflops||0,2);
   const hPeak = gc2.h100_equiv_peak_tflops||0;
   setBar("clH100B", hPeak>0? (gc2.h100_equiv_effective_tflops||0)/hPeak*100 : 0);
 }
@@ -1471,7 +1471,7 @@ function buildGpuCards(){
     return `<div class="gpu-card${active}" data-idx="${i}">
       <div class="gpu-card-top">
         <span class="gpu-idx">GPU ${i}</span>
-        <span class="gpu-ef">${ef!=null? fmt(ef,1)+" H100·TFLOPS" : "--"}</span>
+        <span class="gpu-ef">${ef!=null? fmt(ef,2)+" ×H100" : "--"}</span>
       </div>
       <div class="gpu-model">${nm}</div>
       <div class="gpu-metrics">

@@ -460,8 +460,8 @@ class Monitor:
             summary["total_effective_tflops"] += e
             summary["total_peak_tflops"] += pk
             summary["total_power_w"] += (g["power"]["watts"] or 0)
-            summary["h100_equiv_effective_tflops"] += e * f
-            summary["h100_equiv_peak_tflops"] += pk * f
+            summary["h100_equiv_effective_tflops"] += e / _H100_TF16_DENSE
+            summary["h100_equiv_peak_tflops"] += pk / _H100_TF16_DENSE
             summary["gpu_names"].append(g["name"])
         for k in ("total_effective_tflops", "total_peak_tflops", "total_power_w",
                   "h100_equiv_effective_tflops", "h100_equiv_peak_tflops"):
@@ -724,9 +724,9 @@ class Monitor:
                 "headline_key": "fp16_tc_dense",
                 "headline_label": "FP16/BF16 Tensor 稠密",
                 "effective_tflops": round(spec["tensor_fp16_dense_tflops"] * gpu_u / 100.0, 2),
-                # 实时 H100 等效算力 = 该卡有效算力 × 相对 H100 的算力系数 (前端 GPU 卡片/详情展示用)
+                # 实时 H100 等效算力 = 该卡有效算力 ÷ H100 FP16 稠密峰值, 即"相当于几张 H100" (前端 GPU 卡片/详情展示用)
                 "h100_equiv_effective_tflops": round(
-                    spec["tensor_fp16_dense_tflops"] * gpu_u / 100.0 * h100_factor(name), 2),
+                    spec["tensor_fp16_dense_tflops"] * gpu_u / 100.0 / _H100_TF16_DENSE, 4),
                 "peak_tflops": spec["tensor_fp16_dense_tflops"],
                 "effective_fp32_live_tflops": round(live_fp32, 2),
                 # 兼容旧字段 (已修正: 旧 effective_tensor_tflops 实为 FP8 稀疏档)
