@@ -18,6 +18,7 @@
 - **持久化计量**：累计耗电量（度）与电费跨重启保存。
 - **累计 H100 等效算力时长**：将各卡「利用率 × 时长」按 FP16 Tensor 稠密峰值折算成 H100 等效 GPU 小时（`gpu_h100_hours`），跨重启持久化，概览「等效 AI 算力」卡片可查看。
 - **历史回放**：功率 / 利用率 / 温度 / 累计能耗 趋势曲线（SQLite 落盘，默认保留 30 天）。
+- **数据导出**：历史库可一键导出为 **CSV**（Excel 友好，含可读时间列与 17 个指标列）或 **JSON**（含工具名/生成时间/范围/列定义等元数据），支持 1h / 6h / 24h / 7d / 30d / 全部历史。设置页「数据管理」卡片内选择格式与范围即可下载。
 - **设置页**：采集与历史采样间隔、显示偏好（温度/功率单位、货币符号、界面主题、面板刷新频率）、告警阈值（温度/利用率 + 浏览器桌面通知）、Windows 开机自启、电价与数据管理。偏好落盘 `prefs.json`（自动生成，已 gitignore）。
 
 ### 关于温度与真实 CPU 功率
@@ -105,6 +106,7 @@ python gpu_monitor.py --port 8080 --interval 0.5
 | GET | `/api/memory` | 内存快照 |
 | GET | `/api/settings` | 持久化计量状态 + 用户偏好（prefs / autostart_active） |
 | GET | `/api/history?range=24h` | 历史数据（1h/6h/24h/7d/30d） |
+| GET | `/api/export?format=csv&range=24h` | 导出历史为 CSV / JSON（`format=csv\|json`，`range=1h\|6h\|24h\|7d\|30d\|all`；响应带 `Content-Disposition` 下载头） |
 | POST | `/api/settings` | 持久化计量状态 + 用户偏好（prefs / autostart_active） |
 | POST | `/api/settings/price` | 设置电价（需令牌，远程） |
 | POST | `/api/settings/prefs` | 批量更新偏好（采样/单位/主题/刷新/告警，运行时生效，需令牌） |

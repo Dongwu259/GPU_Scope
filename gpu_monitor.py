@@ -44,6 +44,7 @@ def _errlog(msg):
         pass
 
 import time
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
@@ -1484,6 +1485,60 @@ class History:
             rows = rows[::step]
         return [dict(zip(self.COLS, r)) for r in rows]
 
+    # ---- 导出 (CSV / JSON) ----
+    def rows(self, range_key="24h"):
+        """返回原始行 (按时间升序)。range_key='all' 导出全量历史。"""
+        if range_key == "all":
+            start = 0.0
+        else:
+            secs = self.RANGES.get(range_key, 86400)
+            start = time.time() - secs
+        try:
+            cur = self.conn.execute(
+                "SELECT ts,gpu_pw,gpu_util,gpu_temp,gpu_e_wh,cpu_util,cpu_pw,cpu_e_wh,"
+                "mem_pct,total_pw,total_e_wh,total_cost,"
+                "net_rx_mbs,net_tx_mbs,disk_read_mbs,disk_write_mbs "
+                "FROM samples WHERE ts>=? ORDER BY ts ASC",
+                (start,))
+            return cur.fetchall()
+        except Exception:
+            return []
+
+    def export_csv(self, range_key="24h"):
+        rows = self.rows(range_key)
+        header = ["time", "ts"] + self.COLS[1:]
+        out = [",".join(header)]
+        for r in rows:
+            ts = r[0]
+            dt = datetime.fromtimestamp(ts)
+            tstr = dt.strftime("%Y-%m-%d %H:%M:%S") + (".%03d" % int(round((ts - int(ts)) * 1000)))
+            vals = [tstr, "%.3f" % ts]
+            for v in r[1:]:
+                vals.append("" if v is None else "%.3f" % v)
+            out.append(",".join(vals))
+        return "\r\n".join(out)
+
+    def export_json(self, range_key="24h"):
+        rows = self.rows(range_key)
+        samples = []
+        for r in rows:
+            ts = r[0]
+            dt = datetime.fromtimestamp(ts)
+            rec = {"ts": ts,
+                   "time": dt.strftime("%Y-%m-%d %H:%M:%S") +
+                           (".%03d" % int(round((ts - int(ts)) * 1000)))}
+            for k, v in zip(self.COLS[1:], r[1:]):
+                rec[k] = v
+            samples.append(rec)
+        return {
+            "tool": "GPU_Scope",
+            "generated_at": time.time(),
+            "range": range_key,
+            "count": len(samples),
+            "columns": ["time", "ts"] + self.COLS[1:],
+            "samples": samples,
+        }
+
     def close(self):
         try:
             self.conn.close()
@@ -1504,13 +1559,16 @@ class Handler(BaseHTTPRequestHandler):
     auth_token = None
     server_version = "GPUMonitor/1.3"
 
-    def _send(self, code, body, content_type="application/json"):
+    def _send(self, code, body, content_type="application/json", extra_headers=None):
         if isinstance(body, str):
             body = body.encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        if extra_headers:
+            for k, v in extra_headers.items():
+                self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
@@ -1577,6 +1635,30 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 data = []
             self._send(200, json.dumps({"range": rng, "count": len(data), "samples": data}))
+            return
+        if path == "/api/export":
+            from urllib.parse import parse_qs
+            q = parse_qs(parsed.query)
+            fmt = (q.get("format", ["csv"])[0] or "csv").lower()
+            rng = (q.get("range", ["24h"])[0] or "24h").lower()
+            if fmt not in ("csv", "json"):
+                fmt = "csv"
+            if rng not in ("1h", "6h", "24h", "7d", "30d", "all"):
+                rng = "24h"
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            if self.history is None:
+                self._send(503, json.dumps({"error": "历史库不可用"}))
+                return
+            if fmt == "csv":
+                csv_text = self.history.export_csv(rng)
+                fname = "gpu_scope_history_%s_%s.csv" % (rng, stamp)
+                self._send(200, csv_text, "text/csv; charset=utf-8",
+                           {"Content-Disposition": 'attachment; filename="%s"' % fname})
+            else:
+                js = json.dumps(self.history.export_json(rng), ensure_ascii=False)
+                fname = "gpu_scope_history_%s_%s.json" % (rng, stamp)
+                self._send(200, js, "application/json; charset=utf-8",
+                           {"Content-Disposition": 'attachment; filename="%s"' % fname})
             return
         self._send(404, json.dumps({"error": "not found"}))
 

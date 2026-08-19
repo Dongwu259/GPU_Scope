@@ -856,6 +856,28 @@
           <button id="btnResetMeter" class="btn warn">清除累计能耗与电费</button>
           <button id="btnResetAll" class="btn danger">清除全部历史</button>
         </div>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-top:14px">
+          <div>
+            <div class="label"><span>导出格式</span></div>
+            <select id="expFormat" class="input">
+              <option value="csv">CSV（Excel 友好）</option>
+              <option value="json">JSON（含元数据）</option>
+            </select>
+          </div>
+          <div>
+            <div class="label"><span>时间范围</span></div>
+            <select id="expRange" class="input">
+              <option value="1h">最近 1 小时</option>
+              <option value="6h">最近 6 小时</option>
+              <option value="24h" selected>最近 24 小时</option>
+              <option value="7d">最近 7 天</option>
+              <option value="30d">最近 30 天</option>
+              <option value="all">全部历史</option>
+            </select>
+          </div>
+          <button id="btnExport" class="btn" style="background:var(--accent);color:#fff">导出数据</button>
+          <span id="expState" class="note" style="margin:0"></span>
+        </div>
         <div class="note" style="margin-top:12px">清除后累计能耗 / 电费 / 每日明细将归零（电价保留）。仅影响持久化计量，不影响当前实时指标与图表。</div>
         <div id="setMsg" class="alert" style="display:none"></div>
       </div>
@@ -1751,6 +1773,17 @@ document.getElementById("btnResetAll").addEventListener("click",async()=>{
   const r=await postJSON("/api/settings/reset_all",{});
   if(r&&r.ok){ setMsg("已清除全部历史记录",true); renderSettings(); }
   else setMsg("清除失败",false);
+});
+document.getElementById("btnExport").addEventListener("click",function(){
+  const fmt=document.getElementById("expFormat").value;
+  const rng=document.getElementById("expRange").value;
+  const st=document.getElementById("expState");
+  st.textContent="正在生成下载…"; st.style.color="var(--green)";
+  const url="/api/export?format="+encodeURIComponent(fmt)+"&range="+encodeURIComponent(rng);
+  const a=document.createElement("a");
+  a.href=url; a.rel="noopener";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>{ st.textContent="已触发下载（请查看浏览器下载栏）"; }, 600);
 });
 
 /* ---------------- 主循环 ---------------- */
