@@ -53,6 +53,9 @@
   th.sorted::after{content:" \25BC";font-size:9px}
   th.sorted.asc::after{content:" \25B2";font-size:9px}
   .side-foot{margin-top:auto;display:flex;align-items:center;gap:9px;padding-top:14px;border-top:1px solid rgba(255,255,255,.08);font-size:12px;color:#94a3b8}
+  .side-lang{display:flex;align-items:center;gap:8px;padding-top:12px;font-size:12px;color:#94a3b8}
+  .side-lang .lang-ico{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:6px;background:rgba(255,255,255,.08);color:#e2e8f0;font-size:11px;font-weight:700}
+  .side-lang select{width:auto;flex:1}
   .status-dot{width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px rgba(22,163,74,.18)}
   .status-dot.warn{background:var(--amber);box-shadow:0 0 0 3px rgba(245,158,11,.18)}
   .status-dot.err{background:var(--red);box-shadow:0 0 0 3px rgba(220,38,38,.18)}
@@ -198,6 +201,13 @@
     <div class="side-foot">
       <span class="status-dot" id="dot"></span>
       <span id="clock">--:--:--</span>
+    </div>
+    <div class="side-lang">
+      <span class="lang-ico">文</span>
+      <select id="langSel" class="input" style="padding:4px 6px;font-size:12px;color:#e2e8f0;background:#1e293b;border-color:#334155">
+        <option value="zh">中文</option>
+        <option value="en">English</option>
+      </select>
     </div>
   </aside>
 
@@ -891,8 +901,8 @@
           <div class="row"><span class="k">作者</span><span class="v">Dongwu259</span></div>
         </div>
         <div class="note" style="margin-top:12px">
-          实时 GPU 监测面板 · 数据源 NVIDIA NVML + psutil + Windows 性能计数器 + LibreHardwareMonitor（可选）。
-          累计算力以「H100(SXM) FP16 Tensor 稠密峰值 ≈ 989 TFLOPS」为基准，将各卡「利用率 × 时长」折算成 H100 等效算力时长，跨重启持久化于 meter.json。
+          <span>实时 GPU 监测面板 · 数据源 NVIDIA NVML + psutil + Windows 性能计数器 + LibreHardwareMonitor（可选）。</span>
+          <span>累计算力以「H100(SXM) FP16 Tensor 稠密峰值 ≈ 989 TFLOPS」为基准，将各卡「利用率 × 时长」折算成 H100 等效算力时长，跨重启持久化于 meter.json。</span>
         </div>
         <div style="margin-top:12px">
           <a class="btn" href="https://github.com/Dongwu259/GPU_Scope" target="_blank" rel="noopener">在 GitHub 上查看 ↗</a>
@@ -907,6 +917,235 @@
 </div>
 
 <script>
+// ===================== i18n (中 / 英 自动识别) =====================
+// 规则: 识别到中文(zh*) -> 中文; 其它语言 -> 英文。可手动在侧栏切换并持久化。
+function detectLang(){
+  try{ var s=localStorage.getItem("gpu_scope_lang"); if(s==="zh"||s==="en") return s; }catch(e){}
+  var nav=(navigator.language||navigator.userLanguage||"zh-CN").toLowerCase();
+  return nav.indexOf("zh")===0 ? "zh" : "en";
+}
+var LANG = detectLang();
+function locale(){ return LANG==="en" ? "en-US" : "zh-CN"; }
+// 静态 / 固定文案对照 (zh -> en)。动态含插值文案用 t(zh,en,sub)。
+var ZH2EN = {
+  // 侧栏 / 导航
+  "系统监测台":"System Monitor","GPU · CPU · 内存":"GPU · CPU · Memory",
+  "整机概览":"Overview","GPU 监测":"GPU Monitor","CPU 监测":"CPU Monitor",
+  "内存监测":"Memory Monitor","历史记录":"History","设置":"Settings",
+  // 页头
+  "CPU · GPU · 内存 汇总 · 整机功率与电费（跨重启持久化累计）":"CPU · GPU · Memory summary · total system power & electricity cost (persisted across restarts)",
+  "GPU 监测面板":"GPU Monitor","正在连接 NVML …":"Connecting to NVML …",
+  "正在采集 …":"Collecting …",
+  "DDR 内存使用率 / 频率 / 负载 / PCIe 实时传输":"DDR memory usage / frequency / load / real-time PCIe transfer",
+  "功率 / 利用率 / 温度 / 累计能耗电费（落盘自 history.db，重启保留，默认保留 30 天）":"Power / utilization / temperature / cumulative energy & cost (stored in history.db, kept after restart, 30 days by default)",
+  "采集 · 显示 · 告警 · 自启 · 数据管理":"Collection · Display · Alerts · Autostart · Data",
+  // 卡片标题
+  "整机估算功率":"Estimated System Power","GPU + CPU":"GPU + CPU","累计耗电与电费":"Cumulative Energy & Cost",
+  "持久化累计":"Persisted total","集群 GPU 卡数":"GPU Cards (Cluster)","CPU 路数 / 总核数":"CPU Sockets / Total Cores",
+  "集群 AI 算力 (有效)":"Cluster AI Compute (Effective)","FP16 Tensor":"FP16 Tensor",
+  "集群 H100 等效 (有效)":"Cluster H100 Equivalent (Effective)","网络吞吐":"Network Throughput","收发速率":"RX / TX Rate",
+  "磁盘 I/O 与容量":"Disk I/O & Capacity","读写速率":"Read / Write Rate","整机功率 (W)":"System Power (W)",
+  "GPU / CPU 功率 (W)":"GPU / CPU Power (W)","三组件利用率 (%)":"3-Component Utilization (%)",
+  "等效 AI 算力":"Equivalent AI Compute","FP16/BF16 稠密 · 实时估算":"FP16/BF16 Dense · Real-time Estimate",
+  "核心状态":"Core Status","显存占用":"VRAM Usage","显存带宽占用":"VRAM Bandwidth Usage",
+  "功率 / 上限":"Power / Limit","温度 / 上限":"Temp / Limit","等效 AI 算力 (TFLOPS)":"Equivalent AI Compute (TFLOPS)",
+  "GPU / 显存 利用率 (%)":"GPU / VRAM Utilization (%)","功率 / 温度":"Power / Temperature",
+  "时钟频率 (MHz)":"Clock Frequency (MHz)","媒体引擎利用率 (%)":"Media Engine Utilization (%)",
+  "显存带宽占用 (GB/s)":"VRAM Bandwidth (GB/s)","视频 / 媒体引擎":"Video / Media Engines",
+  "瓶颈分析":"Bottleneck Analysis","实时诊断":"Live Diagnosis","系统 / 链路 / 能耗":"System / Link / Energy",
+  "GPU 进程 (按显存排序)":"GPU Processes (by VRAM)","SM%/显存%/编码/解码 + 真实显存":"SM%/VRAM%/Enc/Dec + Real VRAM",
+  "算力预估":"Compute Estimate","FP32 理论峰值 · 实时估算":"FP32 Peak · Real-time Estimate",
+  "每核心利用率":"Per-Core Utilization","能耗与电费":"Energy & Cost","CPU 利用率":"CPU Utilization",
+  "内存使用":"Memory Usage","实时":"Live","关键指标":"Key Metrics","使用率":"Usage","PCIe 实时传输":"Real-time PCIe Transfer",
+  "内存使用率 (%)":"Memory Usage (%)","PCIe 存储吞吐 (MB/s)":"PCIe Storage Throughput (MB/s)",
+  "提交内存负载 (%)":"Committed Memory Load (%)","采集与历史采样":"Collection & History Sampling",
+  "显示偏好":"Display Preferences","告警阈值":"Alert Thresholds","开机自启":"Auto-start on Boot","Windows":"Windows",
+  "电价设置":"Electricity Price","持久化计量状态":"Persisted Meter State","跨重启保存于 meter.json":"Saved across restarts in meter.json",
+  "每日耗电明细":"Daily Energy Breakdown","最近 7 天":"Last 7 days","数据管理":"Data Management",
+  "关于 GPU_Scope":"About GPU_Scope","开源 · MIT":"Open Source · MIT",
+  // 标签 / 字段
+  "集群内 NVIDIA GPU 总数":"Total NVIDIA GPUs in cluster","多路 CPU 物理核心合计":"Total physical cores across CPU sockets",
+  "采样间隔 (秒)":"Sampling Interval (s)","历史采样间隔 (秒)":"History Sampling Interval (s)","历史保留天数":"History Retention (days)",
+  "温度单位":"Temperature Unit","功率单位":"Power Unit","货币符号":"Currency Symbol","界面主题":"UI Theme",
+  "面板刷新频率 (秒)":"Panel Refresh Interval (s)","GPU 温度告警 (°C，0=关闭)":"GPU Temp Alert (°C, 0=off)",
+  "GPU 利用率低于告警 (%，0=关闭)":"GPU Utilization Below Alert (%, 0=off)","导出格式":"Export Format","时间范围":"Time Range",
+  "显存活动":"VRAM Activity","功率":"Power","温度":"Temperature","风扇":"Fan","架构":"Architecture",
+  "风扇转速":"Fan Speed","计算模式":"Compute Mode","频率余量 (SM)":"Clock Headroom (SM)","频率余量 (显存)":"Clock Headroom (VRAM)",
+  "运行时长":"Uptime","节流状态":"Throttle Status","性能状态 (P-State)":"Performance State (P-State)",
+  "PCIe 链路":"PCIe Link","PCIe 吞吐 (收 / 发)":"PCIe Throughput (RX / TX)","BAR1 显存映射":"BAR1 Memory Mapping",
+  "累计耗电量 (持久化)":"Cumulative Energy (persisted)","预估电费账单":"Estimated Electricity Bill",
+  "平均功率 (自监控启动)":"Average Power (since monitor start)","电压 (读取)":"Voltage (read)","电压来源":"Voltage Source",
+  "功率来源":"Power Source","AVX2 有效":"AVX2 Effective","温度状态":"Temperature Status","已用 / 总量":"Used / Total",
+  "可用":"Available","频率":"Frequency","负载 (提交内存占比)":"Load (committed memory ratio)",
+  "PCIe 读 (存储)":"PCIe Read (storage)","PCIe 写 (存储)":"PCIe Write (storage)","项目名称":"Project Name",
+  "版本":"Version","许可证":"License","作者":"Author",
+  "登录 Windows 时自动启动 GPU_Scope 监测服务":"Auto-start GPU_Scope monitor service when logging into Windows",
+  "GPU 累计耗电":"GPU Cumulative Energy","CPU 累计耗电":"CPU Cumulative Energy","合计耗电":"Total Energy",
+  "预估电费":"Estimated Cost","电价":"Electricity Price","首次记录":"First Record","最近更新":"Last Updated",
+  // 选项
+  "摄氏度 °C":"Celsius °C","华氏度 °F":"Fahrenheit °F","瓦特 W":"Watt W","千瓦 kW":"Kilowatt kW",
+  "CSV（Excel 友好）":"CSV (Excel-friendly)","JSON（含元数据）":"JSON (with metadata)",
+  "最近 1 小时":"Last 1 hour","最近 6 小时":"Last 6 hours","最近 24 小时":"Last 24 hours",
+  "最近 7 天":"Last 7 days","最近 30 天":"Last 30 days","全部历史":"All history",
+  "跟随系统":"Follow system","浅色":"Light","深色":"Dark",
+  "近 1 小时":"Last 1 hour","近 6 小时":"Last 6 hours","近 24 小时":"Last 24 hours","近 7 天":"Last 7 days","近 30 天":"Last 30 days",
+  // 图例
+  "整机":"System","内存负载":"Memory Load","SM 时钟":"SM Clock","显存时钟":"VRAM Clock",
+  "NVENC 编码":"NVENC Enc","NVDEC 解码":"NVDEC Dec","估算带宽占用":"Est. Bandwidth","接收":"RX","发送":"TX",
+  "读":"Read","写":"Write","累计度数":"Cumulative kWh","累计电费":"Cumulative Cost",
+  // 状态 / 提示
+  "加载中…":"Loading…","无数据":"No data","暂无数据":"No data","正常":"Normal","过热":"Overheating",
+  "节流中":"Throttling","N/A (无传感器)":"N/A (no sensor)","Intel x86-64":"Intel x86-64","AMD x86-64":"AMD x86-64","x86-64":"x86-64",
+  "有效":"Effective","峰值":"Peak","稠密":"Dense","FP4 稀疏":"FP4 Sparse",
+  "空闲 / 几乎无负载":"Idle / Almost no load",
+  "GPU 利用率极低，当前基本未在跑计算任务。":"GPU utilization is extremely low; essentially no compute task is running.",
+  "计算受限 (Compute-bound)":"Compute-bound",
+  "GPU 计算单元满载而显存控制器很闲 —— 当前是算力瓶颈，受 Tensor Core / SM 吞吐限制（扩散模型推理常见）。提升算力（更优算子/量化/换卡）才有收益。":"GPU compute units are saturated while the VRAM controller is idle — the current bottleneck is compute, limited by Tensor Core / SM throughput (common in diffusion inference). Improve compute (better kernels / quantization / new GPU) for gains.",
+  "均衡 / 双高负载":"Balanced / Dual-high load",
+  "GPU 与显存带宽均接近满载，已接近该卡理论极限。瓶颈在算力与带宽之间，优化空间有限。":"Both GPU and VRAM bandwidth are near saturation, close to the card's theoretical limit. The bottleneck lies between compute and bandwidth; limited optimization room.",
+  "显存/数据搬运受限":"Memory / Data-movement bound",
+  "显存活动高但 GPU 利用率偏低，常见于小算子、频繁数据搬运或 PCIe/显存带宽瓶颈。可尝试更大 batch、减少主机↔设备拷贝。":"High VRAM activity but low GPU utilization — common with small ops, frequent data movement, or PCIe/VRAM bandwidth bottlenecks. Try larger batches and fewer host↔device copies.",
+  "中等负载":"Moderate load","负载中等，未触达明显瓶颈。":"Moderate load, no obvious bottleneck.",
+  "CPU 监控不可用 (psutil 未安装)":"CPU monitoring unavailable (psutil not installed)",
+  "当前无占用 GPU 的进程":"No processes currently using the GPU",
+  // 长说明 (notes)
+  "整机功率 = GPU 实时功率 + CPU 功率（若已安装 LibreHardwareMonitor 则为真实封装功率，否则为 TDP 估算）。不含主板 / 风扇 / 外设等基础功耗，属近似上界。":"System power = real-time GPU power + CPU power (actual package power if LibreHardwareMonitor is installed, otherwise TDP estimate). Excludes base power of motherboard / fans / peripherals; it is an approximate upper bound.",
+  "GPU / CPU 能耗为跨重启持久化累计（保存于 meter.json），即使本面板重启也不会归零；GPU 部分由 NVML 实测能量差累加，CPU 部分由估算功率积分。电费 = 累计度数 × 电价（默认 ¥0.60/度，可在「设置」页调整并持久化）。":"GPU / CPU energy is persisted across restarts (saved in meter.json) and won't reset even if this panel restarts; the GPU part accumulates from NVML measured energy deltas and the CPU part integrates estimated power. Cost = cumulative kWh × price (default ¥0.60/kWh, adjustable & persisted in Settings).",
+  "所有网卡合计收发字节速率（psutil.net_io_counters 差分，不含协议开销）；下方为各网卡明细。":"Total RX/TX byte rate across all NICs (psutil.net_io_counters delta, excluding protocol overhead); per-NIC details below.",
+  "头条 = Tensor Core FP16/BF16 ":"Headline = Tensor Core FP16/BF16 ",
+  " 峰值 × GPU 利用率。视频生成(扩散模型)以张量核心矩阵乘为主，故以此作为等效 AI 算力。下方为各精度档位的理论峰值与当前有效值（峰值 × 利用率）。注意：NVIDIA 营销的 \"1801 AI TOPS\" 实为 ":" peak × GPU utilization. Video generation (diffusion) is dominated by tensor-core matmul, so this is used as equivalent AI compute. Below are theoretical peaks and current effective values per precision (peak × utilization). Note: NVIDIA's marketed \"1801 AI TOPS\" is actually ",
+  "，并非 FP16。估算基于规格表与硬件利用率计数器，非直接张量活跃度测量。":", not FP16. Estimates are based on spec sheets and hardware utilization counters, not direct tensor activity measurement.",
+  "视频生成管线常借助 NVENC 把生成的帧编码为视频流；此两项显示硬件媒体引擎活跃度。":"Video generation pipelines often use NVENC to encode generated frames into video streams; these two show hardware media engine activity.",
+  "判定基于 GPU 利用率与显存控制器活跃度的差异：高算低带宽=计算受限；双高=均衡/受限于两者；低算高带宽=数据搬运受限。":"Verdict is based on the difference between GPU utilization and VRAM controller activity: high-compute/low-bandwidth = compute-bound; both high = balanced/limited by both; low-compute/high-bandwidth = data-movement bound.",
+  "单进程显存占用来自 Windows 性能计数器 (真实 MB)；SM/显存/编码/解码活跃度来自 NVML 每进程采样。仅显示真正占用 GPU 的进程。":"Per-process VRAM usage comes from Windows performance counters (real MB); SM/VRAM/Enc/Dec activity comes from NVML per-process sampling. Only processes actually using the GPU are shown.",
+  "头条 = AVX-512 FMA 理论峰值 × CPU 利用率。CPU 算力以 ":"Headline = AVX-512 FMA theoretical peak × CPU utilization. CPU compute is measured in ",
+  " 计（1 TFLOPS = 1000 GFLOPS），远低于 GPU 张量核心。峰值按「每核每周期 32 FLOP (512-bit) × 核心数 × 最高频率」估算。实际受指令集、内存带宽、散热限制，此为上界估算。":" GFLOPS (1 TFLOPS = 1000 GFLOPS), far below GPU tensor cores. Peak is estimated as \"32 FLOP per core per cycle (512-bit) × core count × max frequency\". Actual performance is limited by instruction set, memory bandwidth, and thermals; this is an upper-bound estimate.",
+  "说明：CPU 与内存温度在本机 WMI 中未暴露传感器（需安装 LibreHardwareMonitor / OpenHardwareMonitor 等第三方工具才能读取），故显示 ":"Note: CPU and memory temperatures are not exposed by this machine's WMI (a third-party tool such as LibreHardwareMonitor / OpenHardwareMonitor is required to read them), so ",
+  "。PCIe 实时传输量 = 全部磁盘读/写字节速率（走 PCIe 的存储吞吐），可反映 PCIe 总线实时数据量。负载 = 提交内存占「物理内存 + 页面文件」上限的比例。":". Real-time PCIe transfer = total disk read/write byte rate (storage throughput over PCIe), reflecting real-time PCIe bus data volume. Load = committed memory as a ratio of the \"physical memory + page file\" limit.",
+  "采样间隔默认 5 秒（可用 --hist-interval 调整），曲线按时间范围自动降采样到约 720 点以流畅显示。CPU 温度/功率曲线在已安装 LibreHardwareMonitor 时才有数据，否则为空白。网络吞吐与磁盘读写曲线自进阶版起落盘。":"Default sampling interval is 5s (adjustable via --hist-interval); curves are automatically downsampled to ~720 points per time range for smooth display. CPU temperature/power curves only have data when LibreHardwareMonitor is installed, otherwise blank. Network throughput and disk read/write curves are persisted since the advanced version.",
+  "实现方式：将 ":"Implementation: copy ",
+  " 复制到「启动」文件夹。仅 Windows 有效，其他系统忽略。":" to the \"Startup\" folder. Windows-only; other systems ignore it.",
+  "电费 = 累计度数 × 电价，修改后写入 meter.json 持久化。":"Cost = cumulative kWh × price, written to meter.json and persisted after change.",
+  "清除后累计能耗 / 电费 / 每日明细将归零（电价保留）。仅影响持久化计量，不影响当前实时指标与图表。":"After clearing, cumulative energy / cost / daily breakdown reset to zero (price retained). Only affects persisted metering, not current real-time metrics or charts.",
+  "实时 GPU 监测面板 · 数据源 NVIDIA NVML + psutil + Windows 性能计数器 + LibreHardwareMonitor（可选）。":"Real-time GPU monitoring dashboard · Data sources: NVIDIA NVML + psutil + Windows performance counters + LibreHardwareMonitor (optional).",
+  "累计算力以「H100(SXM) FP16 Tensor 稠密峰值 ≈ 989 TFLOPS」为基准，将各卡「利用率 × 时长」折算成 H100 等效算力时长，跨重启持久化于 meter.json。":"Cumulative compute uses the H100(SXM) FP16 Tensor dense peak (~989 TFLOPS) as the baseline, converting each card's \"utilization × duration\" into H100-equivalent compute hours, persisted across restarts in meter.json.",
+  "数据源：NVIDIA NVML + psutil + Windows 性能计数器（每 1s 刷新）+ LibreHardwareMonitor（可选，真实 CPU 温度/功率）· 等效算力为规格峰值 × 利用率估算 · 面板零外部依赖":"Data sources: NVIDIA NVML + psutil + Windows performance counters (refreshed every 1s) + LibreHardwareMonitor (optional, real CPU temp/power) · equivalent compute is spec peak × utilization estimate · zero external dependencies",
+  "无权限 (缺少令牌)":"No permission (missing token)"
+};
+// 补充键 (动态生成/易遗漏的固定文案)
+Object.assign(ZH2EN,{
+  "核心利用率":"Core Utilization","显存利用率":"VRAM Utilization","核心 / 线程":"Cores / Threads",
+  "度 (kWh)":"kWh","度":"kWh","核 / ":"cores / "," 线程":" threads","GFLOPS (AVX-512 有效)":"GFLOPS (AVX-512 effective)",
+  "累计 H100 等效运行 ":"Cumulative H100-equivalent run "," H100·h":" H100·h",
+  "实时 H100 等效算力 ":"Real-time H100-equivalent "," ×H100":" ×H100",
+  "各物理磁盘读写速率":"Per-physical-disk read/write rates","元":"CNY","电价 (":"Price ("," / 度)":" / kWh)"," / 度":" / kWh","未知":"unknown",
+  "利用率长期低于该值（疑似掉卡 / 闲置）时高亮提示":"Highlights when utilization stays below this value (possible dropped card / idle)",
+  "GPU 轮询频率，越大越省资源（0.1–10）":"GPU polling frequency; higher values save resources (0.1–10)",
+  "写入历史库的间隔（1–300）":"Interval for writing to the history DB (1–300)",
+  "超过该天数的历史样本自动清理（1–3650）":"History samples older than this many days are auto-pruned (1–3650)",
+  "电费显示前缀（如 ¥ / $ / €）":"Prefix for cost display (e.g. ¥ / $ / €)",
+  "前端拉取接口的频率（0.5–10）":"Frontend API polling frequency (0.5–10)",
+  "在 GitHub 上查看 ↗":"View on GitHub ↗",
+  "CPU 利用率 (%)":"CPU Utilization (%)","功率 (W, 估算)":"Power (W, estimated)","频率 (MHz)":"Frequency (MHz)",
+  "功率 (W)":"Power (W)","利用率 (%)":"Utilization (%)","温度 (°C)":"Temperature (°C)",
+  "网络吞吐 (MB/s)":"Network Throughput (MB/s)","磁盘读写 (MB/s)":"Disk Read/Write (MB/s)",
+  "累计能耗趋势 (度 / kWh)":"Cumulative Energy Trend (kWh)","累计电费趋势 (元)":"Cumulative Cost Trend",
+  "系统实时监测面板 · GPU / CPU / 内存":"System Monitor · GPU / CPU / Memory",
+  "文":"EN",
+  "累计 H100 等效运行":"Cumulative H100-equivalent run ",
+  "实时 H100 等效算力":"Real-time H100-equivalent ",
+  "核 /":"cores / ","线程":"threads",
+  "↓ 接收":"↓ RX","↑ 发送":"↑ TX",
+  "PCIe 重传":"PCIe Replay","进程":"Process","类型":"Type","显存%":"VRAM%","编码%":"Enc%","解码%":"Dec%",
+  "功率 (估算)":"Power (est.)","核心/线程":"Cores/Threads","TDP 估算":"TDP estimate",
+  "累计耗电量 (CPU 估算)":"Cumulative Energy (CPU est.)","负载 (提交)":"Load (committed)","读 /":"Read / ",
+  "实现方式：将":"Implementation: copy ","复制到「启动」文件夹。仅 Windows 有效，其他系统忽略。":"to the \"Startup\" folder. Windows-only; other systems ignore it.",
+  "/ 度)":"/ kWh)",
+  "GPU 利用率":"GPU Utilization","整机功率 / 电费":"System Power / Cost",
+  "NVENC 编码器利用率":"NVENC Encoder Utilization","NVDEC 解码器利用率":"NVDEC Decoder Utilization",
+  "CPU 监测面板":"CPU Monitor",
+  "启用浏览器桌面通知":"Enable browser desktop notifications","保存全部设置":"Save All Settings",
+  "清除累计能耗与电费":"Clear Cumulative Energy & Cost","清除全部历史":"Clear All History","导出数据":"Export Data",
+  // 长说明按 DOM 叶子文本 (trim 后) 精确匹配
+  "头条 = Tensor Core FP16/BF16":"Headline = Tensor Core FP16/BF16 ",
+  "峰值 × GPU 利用率。视频生成(扩散模型)以张量核心矩阵乘为主，故以此作为等效 AI 算力。下方为各精度档位的理论峰值与当前有效值（峰值 × 利用率）。注意：NVIDIA 营销的 \"1801 AI TOPS\" 实为":" peak × GPU utilization. Video generation (diffusion) is dominated by tensor-core matmul, so this is used as equivalent AI compute. Below are theoretical peaks and current effective values per precision (peak × utilization). Note: NVIDIA's marketed \"1801 AI TOPS\" is actually ",
+  "头条 = AVX-512 FMA 理论峰值 × CPU 利用率。CPU 算力以":"Headline = AVX-512 FMA theoretical peak × CPU utilization. CPU compute is measured in ",
+  "计（1 TFLOPS = 1000 GFLOPS），远低于 GPU 张量核心。峰值按「每核每周期 32 FLOP (512-bit) × 核心数 × 最高频率」估算。实际受指令集、内存带宽、散热限制，此为上界估算。":" GFLOPS (1 TFLOPS = 1000 GFLOPS), far below GPU tensor cores. Peak is estimated as \"32 FLOP per core per cycle (512-bit) × core count × max frequency\". Actual performance is limited by instruction set, memory bandwidth, and thermals; this is an upper-bound estimate.",
+  "说明：CPU 与内存温度在本机 WMI 中未暴露传感器（需安装 LibreHardwareMonitor / OpenHardwareMonitor 等第三方工具才能读取），故显示":"Note: CPU and memory temperatures are not exposed by this machine's WMI (a third-party tool such as LibreHardwareMonitor / OpenHardwareMonitor is required to read them), so "
+});
+// 服务端返回的中文标签/原因映射 (前端补全翻译)
+var LADDER_EN = {
+  "FP32 (Shader)":"FP32 (Shader)","FP16/BF16 (Shader)":"FP16/BF16 (Shader)",
+  "FP16/BF16 Tensor 稠密":"FP16/BF16 Tensor Dense",
+  "FP16/BF16 Tensor 稀疏(2:4)":"FP16/BF16 Tensor Sparse (2:4)",
+  "FP8 Tensor 稀疏":"FP8 Tensor Sparse","FP4 Tensor 稀疏 (AI TOPS)":"FP4 Tensor Sparse (AI TOPS)"
+};
+var THROTTLE_EN = {
+  "GPU 空闲降频":"GPU idle clock down","应用自定义时钟设置":"Application custom clock setting",
+  "软件功率上限 (Power Cap)":"Software power cap (Power Cap)","硬件减速 (过热/供电)":"Hardware slow-down (overheat/power)",
+  "Sync Boost 同步":"Sync Boost","软件热节流 (SW Thermal)":"Software thermal throttle (SW Thermal)",
+  "硬件热节流 (HW Thermal)":"Hardware thermal throttle (HW Thermal)",
+  "硬件功率保护节流 (Power Brake)":"Power brake throttle (Power Brake)","显示时钟设置":"Display clock setting"
+};
+function ladderLabel(zh){ return LANG==="en" ? (LADDER_EN[zh]||zh) : zh; }
+function throttleLabel(zh){ return LANG==="en" ? (THROTTLE_EN[zh]||zh) : zh; }
+// t(): 含插值的动态文案
+function t(zh,en,sub){
+  var s = (LANG==="en") ? en : zh;
+  if(sub){ for(var k in sub){ s = s.split("{{"+k+"}}").join(sub[k]==null?"":String(sub[k])); } }
+  return s;
+}
+// 将当前文档中可见中文文案翻译为英文 (或还原为中文); 每帧调用, 幂等
+function applyTranslations(root){
+  if(!root) root=document;
+  if(!root) return;
+  var w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode:function(n){
+      if(!n.nodeValue||!n.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
+      var p=n.parentElement;
+      if(p && (p.tagName==="SCRIPT"||p.tagName==="STYLE"||p.tagName==="CODE"||p.tagName==="NOSCRIPT")) return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    }
+  }, false);
+  var nodes=[], n;
+  while((n=w.nextNode())) nodes.push(n);
+  nodes.forEach(function(node){
+    if(node._orig===undefined) node._orig=node.nodeValue;
+    var key=node._orig.trim();
+    node.nodeValue = (LANG==="en") ? (ZH2EN[key]!==undefined?ZH2EN[key]:node._orig) : node._orig;
+  });
+  root.querySelectorAll("[placeholder],[title],[aria-label]").forEach(function(el){
+    ["placeholder","title","aria-label"].forEach(function(a){
+      if(el.getAttribute(a)==null) return;
+      if(el["_o_"+a]===undefined) el["_o_"+a]=el.getAttribute(a);
+      var key=(el["_o_"+a]||"").trim();
+      el.setAttribute(a, (LANG==="en") ? (ZH2EN[key]!==undefined?ZH2EN[key]:el["_o_"+a]) : el["_o_"+a]);
+    });
+  });
+}
+// 切换语言时: 翻译 + 重渲染当前页 (刷新 t() 文案与图表 series 名)
+function applyLang(){
+  applyTranslations(document);
+  if(activePage==="settings") renderSettings();
+  else if(activePage==="gpu"){ var g=latestGpus[selectedGpuIdx]; if(g) renderGpu(g); }
+  else if(activePage==="cpu" && latestCpu) renderCpu(latestCpu);
+  else if(activePage==="mem" && latestMem) renderMem(latestMem);
+  else if(activePage==="overview") renderOverview();
+  else if(activePage==="history") loadHistory();
+  drawActiveCharts(); clock();
+}
+(function(){
+  var sel=document.getElementById("langSel");
+  if(sel){
+    sel.value=LANG;
+    sel.addEventListener("change",function(){
+      LANG=this.value;
+      try{ localStorage.setItem("gpu_scope_lang", LANG); }catch(e){}
+      applyLang();
+    });
+  }
+})();
+
 const MAXPTS = 120;
 const H = { flops:[], gpu:[], mem:[], pwr:[], tmp:[], smclk:[], memclk:[], enc:[], dec:[], bw:[],
             cpuUtil:[], cpuPwr:[], cpuFreq:[], memPct:[], memRd:[], memWr:[], memLoad:[], totalPwr:[],
@@ -1113,7 +1352,10 @@ function renderGpu(g){
   latestGpu=g;
   curFlops=g.compute.effective_tflops;
   // 页标题/副标题改由 buildGpuCards 维护 (集群视角); 此处仅保留选中卡的 GPU 型号简述
-  document.getElementById("gpuSub").textContent=`选中 GPU ${selectedGpuIdx} · 驱动 ${g.driver} · CUDA ${g.cuda} · ${g.spec.arch} · ${g.spec.cuda_cores} CUDA 核 · ${g.spec.tensor_cores} Tensor 核`;
+  document.getElementById("gpuSub").textContent=t(
+    '选中 GPU {{i}} · 驱动 {{drv}} · CUDA {{cuda}} · {{arch}} · {{cc}} CUDA 核 · {{tc}} Tensor 核',
+    'Selected GPU {{i}} · Driver {{drv}} · CUDA {{cuda}} · {{arch}} · {{cc}} CUDA cores · {{tc}} Tensor cores',
+    {i:selectedGpuIdx, drv:g.driver, cuda:g.cuda, arch:g.spec.arch, cc:g.spec.cuda_cores, tc:g.spec.tensor_cores});
 
   document.getElementById("aiFlops").textContent=fmt(curFlops,1);
   const cumH100 = g.system ? g.system.gpu_h100_hours_cum : null;
@@ -1125,7 +1367,7 @@ function renderGpu(g){
   document.getElementById("ladder").innerHTML=lad.map(x=>{
     const p=Math.min(100, x.peak_tflops/maxPeak*100);
     const hl=(x.key===g.compute.headline_key)?" hl":"";
-    return `<div class="row${hl}"><span class="name" title="峰值 ${x.peak_tflops} TFLOPS">${x.label}</span>`+
+    return `<div class="row${hl}"><span class="name" title="峰值 ${x.peak_tflops} TFLOPS">${ladderLabel(x.label)}</span>`+
            `<span class="barwrap"><i style="width:${p}%"></i></span>`+
            `<span class="val">有效 ${fmt(x.effective_tflops,1)} / 峰值 ${fmt(x.peak_tflops,1)}</span></div>`;
   }).join("");
@@ -1150,8 +1392,8 @@ function renderGpu(g){
   document.getElementById("uptime").textContent = up>=3600?(Math.floor(up/3600)+"h "+Math.floor((up%3600)/60)+"m"):(Math.floor(up/60)+"m "+Math.floor(up%60)+"s");
   const thr=g.throttle_reasons||[];
   const tsEl=document.getElementById("thrStatus");
-  if(thr.length){ tsEl.textContent="节流中"; tsEl.className="v bad"; }
-  else { tsEl.textContent="正常"; tsEl.className="v ok"; }
+  if(thr.length){ tsEl.textContent=t("节流中","Throttling"); tsEl.className="v bad"; }
+  else { tsEl.textContent=t("正常","Normal"); tsEl.className="v ok"; }
 
   document.getElementById("memPct").textContent=g.memory.used_percent+"%";
   document.getElementById("memUsed").textContent=(g.memory.used_mb/1024).toFixed(1);
@@ -1179,8 +1421,8 @@ function renderGpu(g){
   document.getElementById("pcie").textContent=(s.pcie_gen!=null&&s.pcie_width!=null)?(`Gen${s.pcie_gen} ×${s.pcie_width} (最高 Gen${s.pcie_max_gen||'?'})`):"--";
   document.getElementById("pcieTp").textContent=(s.pcie_rx_mbs!=null&&s.pcie_tx_mbs!=null)?(`${s.pcie_rx_mbs} / ${s.pcie_tx_mbs} MB/s`):"--";
   document.getElementById("bar1").textContent=(s.bar1_used_gib!=null)?(`${s.bar1_used_gib} / ${s.bar1_total_gib} GiB`):"--";
-  document.getElementById("energy").textContent=(s.energy_kwh_cum!=null)?(`${s.energy_kwh_cum} 度 (${s.energy_wh_cum} Wh)`):"--";
-  document.getElementById("cost").textContent=(s.elec_cost_cum!=null)?(`${CUR()}${s.elec_cost_cum.toFixed(4)} @${CUR()}${s.elec_rate_yuan_per_kwh}/度`):"--";
+  document.getElementById("energy").textContent=(s.energy_kwh_cum!=null)?t("{{v}} 度 ({{w}} Wh)","{{v}} kWh ({{w}} Wh)",{v:s.energy_kwh_cum, w:s.energy_wh_cum}):"--";
+  document.getElementById("cost").textContent=(s.elec_cost_cum!=null)?t("{{c}} @{{r}}/度","{{c}} @{{r}}/kWh",{c:CUR()+s.elec_cost_cum.toFixed(4), r:CUR()+s.elec_rate_yuan_per_kwh}):"--";
   document.getElementById("avgPwr").textContent=(s.avg_power_since_start_w!=null)?(`${s.avg_power_since_start_w} W`):"--";
 
   // 瓶颈分析
@@ -1188,16 +1430,16 @@ function renderGpu(g){
     const uG=g.utilization.gpu, uM=g.utilization.memory, vram=g.memory.used_percent;
     const replay=(g.system.pcie_replay_count!=null)?g.system.pcie_replay_count:0;
     let verdict, desc, color;
-    if(uG<5){ verdict="空闲 / 几乎无负载"; color="var(--muted)";
-      desc="GPU 利用率极低，当前基本未在跑计算任务。"; }
-    else if(uG>=60 && uM<15){ verdict="计算受限 (Compute-bound)"; color="var(--accent)";
-      desc="GPU 计算单元满载而显存控制器很闲 —— 当前是算力瓶颈，受 Tensor Core / SM 吞吐限制（扩散模型推理常见）。提升算力（更优算子/量化/换卡）才有收益。"; }
-    else if(uG>=60 && uM>=50){ verdict="均衡 / 双高负载"; color="var(--amber)";
-      desc="GPU 与显存带宽均接近满载，已接近该卡理论极限。瓶颈在算力与带宽之间，优化空间有限。"; }
-    else if(uG<60 && uM>=40){ verdict="显存/数据搬运受限"; color="var(--cyan)";
-      desc="显存活动高但 GPU 利用率偏低，常见于小算子、频繁数据搬运或 PCIe/显存带宽瓶颈。可尝试更大 batch、减少主机↔设备拷贝。"; }
-    else { verdict="中等负载"; color="var(--green)";
-      desc="负载中等，未触达明显瓶颈。"; }
+    if(uG<5){ verdict=t("空闲 / 几乎无负载","Idle / Almost no load"); color="var(--muted)";
+      desc=t("GPU 利用率极低，当前基本未在跑计算任务。","GPU utilization is extremely low; essentially no compute task is running."); }
+    else if(uG>=60 && uM<15){ verdict=t("计算受限 (Compute-bound)","Compute-bound"); color="var(--accent)";
+      desc=t("GPU 计算单元满载而显存控制器很闲 —— 当前是算力瓶颈，受 Tensor Core / SM 吞吐限制（扩散模型推理常见）。提升算力（更优算子/量化/换卡）才有收益。","GPU compute units are saturated while the VRAM controller is idle — the current bottleneck is compute, limited by Tensor Core / SM throughput (common in diffusion inference). Improve compute (better kernels / quantization / new GPU) for gains."); }
+    else if(uG>=60 && uM>=50){ verdict=t("均衡 / 双高负载","Balanced / Dual-high load"); color="var(--amber)";
+      desc=t("GPU 与显存带宽均接近满载，已接近该卡理论极限。瓶颈在算力与带宽之间，优化空间有限。","Both GPU and VRAM bandwidth are near saturation, close to the card's theoretical limit. The bottleneck lies between compute and bandwidth; limited optimization room."); }
+    else if(uG<60 && uM>=40){ verdict=t("显存/数据搬运受限","Memory / Data-movement bound"); color="var(--cyan)";
+      desc=t("显存活动高但 GPU 利用率偏低，常见于小算子、频繁数据搬运或 PCIe/显存带宽瓶颈。可尝试更大 batch、减少主机↔设备拷贝。","High VRAM activity but low GPU utilization — common with small ops, frequent data movement, or PCIe/VRAM bandwidth bottlenecks. Try larger batches and fewer host↔device copies."); }
+    else { verdict=t("中等负载","Moderate load"); color="var(--green)";
+      desc=t("负载中等，未触达明显瓶颈。","Moderate load, no obvious bottleneck."); }
     document.getElementById("bottVerdict").textContent=verdict;
     document.getElementById("bottDesc").textContent=desc;
     document.getElementById("bottDot").style.background=color;
@@ -1217,25 +1459,32 @@ function renderGpu(g){
   const al=document.getElementById("alert");
   const msgs=[];
   if(g.throttle_reasons&&g.throttle_reasons.length){
-    msgs.push("⚠ <b>时钟节流中：</b>"+g.throttle_reasons.join("、")+"。算力可能低于峰值，请检查供电 / 散热 / 功率上限。");
+    var thrJoined = g.throttle_reasons.map(throttleLabel).join(LANG==="en"?" / ":"、");
+    msgs.push(t("⚠ <b>时钟节流中：</b>{{r}}。算力可能低于峰值，请检查供电 / 散热 / 功率上限。",
+                  "⚠ <b>Clock throttling:</b> {{r}}. Compute may be below peak; check power supply / cooling / power limit.",
+                  {r:thrJoined}));
   }
   const at=PREFS.alert_temp||0, au=PREFS.alert_util_low||0;
-  if(at>0 && tp>=at) msgs.push("🌡 GPU 温度 "+fmtTemp(tp)+" 已达告警阈值 "+at+"°C，注意散热。");
-  if(au>0 && uG<au) msgs.push("🐢 GPU 利用率仅 "+uG+"%，低于告警阈值 "+au+"%，疑似掉卡或闲置。");
+  if(at>0 && tp>=at) msgs.push(t("🌡 GPU 温度 {{tp}} 已达告警阈值 {{at}}°C，注意散热。",
+                                    "🌡 GPU temperature {{tp}} reached alert threshold {{at}}°C; watch cooling.",
+                                    {tp:fmtTemp(tp), at:at}));
+  if(au>0 && uG<au) msgs.push(t("🐢 GPU 利用率仅 {{u}}%，低于告警阈值 {{au}}%，疑似掉卡或闲置。",
+                                  "🐢 GPU utilization is only {{u}}%, below alert threshold {{au}}% — possible dropped card or idle.",
+                                  {u:uG, au:au}));
   if(msgs.length){
     al.className="alert show"; al.innerHTML=msgs.join("<br>"); setStatus("warn");
     // 桌面通知 (节流: 同一组合 60s 内只发一次)
     if(("Notification" in window) && Notification.permission==="granted"){
       const key=(at>0&&tp>=at?"T":"")+(au>0&&uG<au?"U":"")+(g.throttle_reasons&&g.throttle_reasons.length?"H":"");
       const now=Date.now();
-      if(_notifKey!==key || now-_notifTs>60000){ _notifKey=key; _notifTs=now; try{ new Notification("GPU_Scope 告警",{body:msgs[0]}); }catch(e){} }
+      if(_notifKey!==key || now-_notifTs>60000){ _notifKey=key; _notifTs=now; try{ new Notification(t("GPU_Scope 告警","GPU_Scope Alert"),{body:msgs[0]}); }catch(e){} }
     }
   } else { al.className="alert"; setStatus(uG>3?"ok":"warn"); }
 }
 
 function renderProcTable(){
   const tb=document.getElementById("procBody");
-  if(!procData.length){ tb.innerHTML='<tr><td colspan="8" style="color:var(--muted)">当前无占用 GPU 的进程</td></tr>'; return; }
+  if(!procData.length){ tb.innerHTML='<tr><td colspan="8" style="color:var(--muted)">'+t("当前无占用 GPU 的进程","No processes currently using the GPU")+'</td></tr>'; return; }
   const k=procSort.key, dir=procSort.dir;
   const arr=procData.slice().sort((a,b)=>{
     let va=a[k], vb=b[k];
@@ -1249,7 +1498,7 @@ function renderProcTable(){
     return `<tr>
       <td>${p.pid}</td>
       <td class="proc">${p.name}</td>
-      <td><span class="pill ${p.compute?'c':'g'}">${p.compute?'C':'G'}</span></td>
+      <td><span class="pill ${p.compute?'c':'g'}">${p.compute?t('C','Compute'):t('G','Graphics')}</span></td>
       <td><div style="display:flex;align-items:center;gap:6px"><div class="ubar"><i class="b-acc" style="width:${sm}%"></i></div>${sm}%</div></td>
       <td><div style="display:flex;align-items:center;gap:6px"><div class="ubar"><i class="b-mem" style="width:${mu}%"></i></div>${mu}%</div></td>
       <td><div style="display:flex;align-items:center;gap:6px"><div class="ubar"><i class="b-enc" style="width:${en}%"></i></div>${en}%</div></td>
@@ -1273,7 +1522,7 @@ function bindProcSort(){
 
 /* ---------------- CPU 渲染 ---------------- */
 function renderCpu(d){
-  if(!d||d.error){ document.getElementById("cpuName2").textContent="CPU 监控不可用 (psutil 未安装)"; return; }
+  if(!d||d.error){ document.getElementById("cpuName2").textContent=t("CPU 监控不可用 (psutil 未安装)","CPU monitoring unavailable (psutil not installed)"); return; }
   latestCpu=d;
 
   const cpuSocks=(d.sockets&&d.sockets.length)?d.sockets:null;
@@ -1288,16 +1537,19 @@ function renderCpu(d){
   const csUtil=(cs.utilization!=null)?cs.utilization:(d.utilization||0);
   const csPw=(cs.power_w!=null)?cs.power_w:d.power_w;
   const cpt=document.getElementById("cpuPageTitle");
-  if(cpt) cpt.textContent = cpuN>1?`CPU 监测面板 · 共 ${cpuN} 路`:"CPU 监测面板";
-  document.getElementById("cpuName2").textContent=(cpuN>1?`CPU ${selectedCpuIdx} · `:"")+`${csName} · ${csCores}核/${csThreads}线程`+(cpuN>1?` · TDP ${csTdp} W`:` · 最高 ${d.max_mhz} MHz`);
+  if(cpt) cpt.textContent = cpuN>1?t(`CPU 监测面板 · 共 ${cpuN} 路`,`CPU Monitor · ${cpuN} sockets`,{n:cpuN}):t("CPU 监测面板","CPU Monitor");
+  document.getElementById("cpuName2").textContent=t(
+    (cpuN>1?`CPU {{i}} · `:"")+`{{name}} · {{cores}}核/{{threads}}线程`+(cpuN>1?` · TDP {{tdp}} W`:` · 最高 {{max}} MHz`),
+    (cpuN>1?`CPU {{i}} · `:"")+`{{name}} · {{cores}}C/{{threads}}T`+(cpuN>1?` · TDP {{tdp}} W`:` · max {{max}} MHz`),
+    {i:selectedCpuIdx, name:csName, cores:csCores, threads:csThreads, tdp:csTdp, max:d.max_mhz});
   const c=d.compute;
   document.getElementById("cpuGflops").textContent=fmt(c.avx512_effective_gflops,0);
   const maxPeak=Math.max(c.avx2_peak_gflops,c.avx512_peak_gflops,1);
   const rows=[
-    {n:"AVX-512 峰值",peak:c.avx512_peak_gflops,eff:c.avx512_peak_gflops,hl:true},
-    {n:"AVX-512 有效 (当前)",peak:c.avx512_peak_gflops,eff:c.avx512_effective_gflops,hl:true},
-    {n:"AVX2 峰值",peak:c.avx2_peak_gflops,eff:c.avx2_peak_gflops,hl:false},
-    {n:"AVX2 有效 (当前)",peak:c.avx2_peak_gflops,eff:c.avx2_effective_gflops,hl:false},
+    {n:t("AVX-512 峰值","AVX-512 Peak"),peak:c.avx512_peak_gflops,eff:c.avx512_peak_gflops,hl:true},
+    {n:t("AVX-512 有效 (当前)","AVX-512 Effective (current)"),peak:c.avx512_peak_gflops,eff:c.avx512_effective_gflops,hl:true},
+    {n:t("AVX2 峰值","AVX2 Peak"),peak:c.avx2_peak_gflops,eff:c.avx2_peak_gflops,hl:false},
+    {n:t("AVX2 有效 (当前)","AVX2 Effective (current)"),peak:c.avx2_peak_gflops,eff:c.avx2_effective_gflops,hl:false},
   ];
   document.getElementById("cpuLadder").innerHTML=rows.map(x=>{
     const p=Math.min(100,x.peak/maxPeak*100);
@@ -1311,12 +1563,12 @@ function renderCpu(d){
   document.getElementById("cpuPwrV").textContent=pw!=null?fmtPower(pw):"--"; setBar("cpuPwrB",(pw&&csTdp)?Math.min(100,pw/(csTdp*1.3)*100):0);
   const lhmAvail = !!(d.lhm && d.lhm.available);
   if(tmp==null){ document.getElementById("cpuTmpV").textContent="N/A"; setBar("cpuTmpB",0);
-    const ts=document.getElementById("cpuTmpStatus"); ts.textContent="N/A (无传感器)"; ts.className="v warn"; }
+    const ts=document.getElementById("cpuTmpStatus"); ts.textContent=t("N/A (无传感器)","N/A (no sensor)"); ts.className="v warn"; }
   else { document.getElementById("cpuTmpV").textContent=fmtTemp(tmp); setBar("cpuTmpB",Math.min(100,tmp/100*100));
-    const ts=document.getElementById("cpuTmpStatus"); ts.textContent=(tmp>85?"过热":"正常")+(lhmAvail?" · LHM实测":""); ts.className="v "+(tmp>85?"bad":"ok"); }
+    const ts=document.getElementById("cpuTmpStatus"); ts.textContent=(tmp>85?t("过热","Overheating"):t("正常","Normal"))+(lhmAvail?t(" · LHM实测"," · LHM measured"):""); ts.className="v "+(tmp>85?"bad":"ok"); }
   const lhmNote=document.getElementById("cpuLhmNote");
-  if(lhmAvail){ lhmNote.style.color="var(--green)"; lhmNote.textContent="✓ 已接入 LibreHardwareMonitor（"+d.lhm.method+"），CPU 温度与功率为实测值。"; }
-  else { lhmNote.style.color="var(--muted)"; lhmNote.textContent="未检测到 LibreHardwareMonitor：CPU 温度/真实功率显示 N/A。安装并运行 LHM 后可自动读取实测温度与封装功率（下载 github.com/LibreHardwareMonitor/LibreHardwareMonitor，运行后启用 WMI 或内置 Web 服务）。"; }
+  if(lhmAvail){ lhmNote.style.color="var(--green)"; lhmNote.textContent=t("✓ 已接入 LibreHardwareMonitor（{{m}}），CPU 温度与功率为实测值。","✓ LibreHardwareMonitor connected ({{m}}); CPU temperature and power are measured.",{m:d.lhm.method}); }
+  else { lhmNote.style.color="var(--muted)"; lhmNote.textContent=t("未检测到 LibreHardwareMonitor：CPU 温度/真实功率显示 N/A。安装并运行 LHM 后可自动读取实测温度与封装功率（下载 github.com/LibreHardwareMonitor/LibreHardwareMonitor，运行后启用 WMI 或内置 Web 服务）。","LibreHardwareMonitor not detected: CPU temperature / real power show N/A. Install and run LHM to automatically read measured temperature and package power (download github.com/LibreHardwareMonitor/LibreHardwareMonitor, then enable WMI or its built-in web service)."); }
   document.getElementById("cpuVoltV").textContent=volt!=null?(volt+" V"):"N/A";
   setBar("cpuVoltB",(volt&&volt>0&&volt<=2)?volt/2*100:0);
 
@@ -1325,14 +1577,14 @@ function renderCpu(d){
     const pn=document.getElementById("cpuPwrNote"), pn2=document.getElementById("cpuPwrNote2");
     if(pn){ pn.textContent=psrc; pn.className="v "+cls; }
     if(pn2){ pn2.textContent=psrc; pn2.className="v "+cls; } }
-  document.getElementById("cpuArch").textContent=(d.name||"").includes("Intel")?"Intel x86-64":((d.name||"").includes("AMD")?"AMD x86-64":"x86-64");
+  document.getElementById("cpuArch").textContent=(d.name||"").includes("Intel")?t("Intel x86-64","Intel x86-64"):((d.name||"").includes("AMD")?t("AMD x86-64","AMD x86-64"):t("x86-64","x86-64"));
   document.getElementById("cpuCT").textContent=`${csCores}/${csThreads}`;
   document.getElementById("cpuTdp").textContent=csTdp;
   document.getElementById("cpuAvx2Eff").textContent=fmt(c.avx2_effective_gflops,0)+" GFLOPS";
 
-  document.getElementById("cpuEnergy").textContent=(d.energy_kwh!=null)?(`${d.energy_kwh} 度 (${d.energy_wh} Wh)`):"--";
-  document.getElementById("cpuCost").textContent=(d.electricity_cost_yuan!=null)?(`${CUR()}${d.electricity_cost_yuan} @${CUR()}${d.elec_rate_yuan_per_kwh}/度`):"--";
-  document.getElementById("cpuRate").textContent=(d.elec_rate_yuan_per_kwh!=null)?(`${CUR()}${d.elec_rate_yuan_per_kwh}/度`):"--";
+  document.getElementById("cpuEnergy").textContent=(d.energy_kwh!=null)?t("{{v}} 度 ({{w}} Wh)","{{v}} kWh ({{w}} Wh)",{v:d.energy_kwh, w:d.energy_wh}):"--";
+  document.getElementById("cpuCost").textContent=(d.electricity_cost_yuan!=null)?t("{{c}} @{{r}}/度","{{c}} @{{r}}/kWh",{c:CUR()+d.electricity_cost_yuan, r:CUR()+d.elec_rate_yuan_per_kwh}):"--";
+  document.getElementById("cpuRate").textContent=(d.elec_rate_yuan_per_kwh!=null)?t("{{r}}/度","{{r}}/kWh",{r:CUR()+d.elec_rate_yuan_per_kwh}):"--";
 
   // 每核心
   const per=d.per_core||[];
@@ -1480,7 +1732,7 @@ function renderOverview(){
     if(nb && c.net.ifaces && c.net.ifaces.length){
       nb.innerHTML = c.net.ifaces.map(i=>{
         const dot = i.up ? "background:#22c55e" : "background:#64748b";
-        const spd = i.speed_mbps ? (i.speed_mbps>=1000? (i.speed_mbps/1000)+" Gbps" : i.speed_mbps+" Mbps") : "未知";
+        const spd = i.speed_mbps ? (i.speed_mbps>=1000? (i.speed_mbps/1000)+" Gbps" : i.speed_mbps+" Mbps") : t("未知","unknown");
         const rx = (i.rx_mbs!=null)? i.rx_mbs : "--";
         const tx = (i.tx_mbs!=null)? i.tx_mbs : "--";
         const ip = i.ip ? i.ip : "—";
@@ -1517,7 +1769,7 @@ function renderOverview(){
           const rd = (d.read_mbs!=null)? d.read_mbs : "--";
           const wr = (d.write_mbs!=null)? d.write_mbs : "--";
           return `<div style="display:flex;justify-content:space-between;font-size:12px;color:#cbd5e1;padding:2px 0;border-bottom:1px solid rgba(255,255,255,.05)">
-            <span>${d.name}</span><span>读 ${rd} · 写 ${wr} MB/s</span></div>`;
+            <span>${d.name}</span><span>${t("读 {{rd}} · 写 {{wr}} MB/s","Read {{rd}} · Write {{wr}} MB/s",{rd:rd,wr:wr})}</span></div>`;
         }).join("");
     }
   }
@@ -1548,32 +1800,32 @@ function renderOverview(){
 /* ---------------- 图表绘制 (仅当前页) ---------------- */
 function drawActiveCharts(){
   if(activePage==="overview"){
-    drawChart(document.getElementById("chartOvPwr"),[{data:H.totalPwr.map(convPower),name:"整机功率",unit:uP(),dec:0,color:"#7c3aed"}]);
+    drawChart(document.getElementById("chartOvPwr"),[{data:H.totalPwr.map(convPower),name:t("整机功率","System power"),unit:uP(),dec:0,color:"#7c3aed"}]);
     drawChart(document.getElementById("chartOvSplit"),[{data:H.gpuPwrTot.map(convPower),name:"GPU",unit:uP(),dec:0,color:"#7c3aed"},{data:H.cpuPwr.map(convPower),name:"CPU",unit:uP(),dec:0,color:"#2563eb"}]);
-    drawChart(document.getElementById("chartOvUtil"),[{data:H.gpuUtilAvg,name:"GPU",unit:"%",dec:1,color:"#7c3aed"},{data:H.cpuUtil,name:"CPU",unit:"%",dec:1,color:"#2563eb"},{data:H.memLoad,name:"内存",unit:"%",dec:1,color:"#0891b2"}]);
+    drawChart(document.getElementById("chartOvUtil"),[{data:H.gpuUtilAvg,name:"GPU",unit:"%",dec:1,color:"#7c3aed"},{data:H.cpuUtil,name:"CPU",unit:"%",dec:1,color:"#2563eb"},{data:H.memLoad,name:t("内存","Memory"),unit:"%",dec:1,color:"#0891b2"}]);
   } else if(activePage==="gpu"){
-    drawChart(document.getElementById("chartFlops"),[{data:H.flops,name:"等效算力",unit:" TFLOPS",dec:1,color:"#7c3aed"}]);
-    drawChart(document.getElementById("chartUtil"),[{data:H.gpu,name:"GPU 利用率",unit:"%",dec:1,color:"#2563eb"},{data:H.mem,name:"显存活动",unit:"%",dec:1,color:"#0891b2"}]);
-    drawChart(document.getElementById("chartPwr"),[{data:H.pwr.map(convPower),name:"功率",unit:uP(),dec:0,color:"#f59e0b"},{data:H.tmp.map(convTemp),name:"温度",unit:uT(),dec:1,color:"#dc2626"}]);
-    drawChart(document.getElementById("chartClk"),[{data:H.smclk,name:"SM 时钟",unit:" MHz",dec:0,color:"#2563eb"},{data:H.memclk,name:"显存时钟",unit:" MHz",dec:0,color:"#0891b2"}]);
+    drawChart(document.getElementById("chartFlops"),[{data:H.flops,name:t("等效算力","Effective compute"),unit:" TFLOPS",dec:1,color:"#7c3aed"}]);
+    drawChart(document.getElementById("chartUtil"),[{data:H.gpu,name:t("GPU 利用率","GPU utilization"),unit:"%",dec:1,color:"#2563eb"},{data:H.mem,name:t("显存活动","VRAM activity"),unit:"%",dec:1,color:"#0891b2"}]);
+    drawChart(document.getElementById("chartPwr"),[{data:H.pwr.map(convPower),name:t("功率","Power"),unit:uP(),dec:0,color:"#f59e0b"},{data:H.tmp.map(convTemp),name:t("温度","Temp"),unit:uT(),dec:1,color:"#dc2626"}]);
+    drawChart(document.getElementById("chartClk"),[{data:H.smclk,name:t("SM 时钟","SM clock"),unit:" MHz",dec:0,color:"#2563eb"},{data:H.memclk,name:t("显存时钟","VRAM clock"),unit:" MHz",dec:0,color:"#0891b2"}]);
     drawChart(document.getElementById("chartMedia"),[{data:H.enc,name:"NVENC",unit:"%",dec:1,color:"#7c3aed"},{data:H.dec,name:"NVDEC",unit:"%",dec:1,color:"#16a34a"}]);
-    drawChart(document.getElementById("chartBw"),[{data:H.bw,name:"带宽",unit:" GB/s",dec:1,color:"#0ea5e9"}]);
+    drawChart(document.getElementById("chartBw"),[{data:H.bw,name:t("带宽","Bandwidth"),unit:" GB/s",dec:1,color:"#0ea5e9"}]);
   } else if(activePage==="cpu"){
-    drawChart(document.getElementById("chartCpuUtil"),[{data:H.cpuUtil,name:"CPU 利用率",unit:"%",dec:1,color:"#2563eb"}]);
-    drawChart(document.getElementById("chartCpuPwr"),[{data:H.cpuPwr.map(convPower),name:"CPU 功率",unit:uP(),dec:0,color:"#f59e0b"}]);
-    drawChart(document.getElementById("chartCpuFreq"),[{data:H.cpuFreq,name:"频率",unit:" MHz",dec:0,color:"#7c3aed"}]);
+    drawChart(document.getElementById("chartCpuUtil"),[{data:H.cpuUtil,name:t("CPU 利用率","CPU utilization"),unit:"%",dec:1,color:"#2563eb"}]);
+    drawChart(document.getElementById("chartCpuPwr"),[{data:H.cpuPwr.map(convPower),name:t("CPU 功率","CPU power"),unit:uP(),dec:0,color:"#f59e0b"}]);
+    drawChart(document.getElementById("chartCpuFreq"),[{data:H.cpuFreq,name:t("频率","Frequency"),unit:" MHz",dec:0,color:"#7c3aed"}]);
   } else if(activePage==="mem"){
-    drawChart(document.getElementById("chartMemPct"),[{data:H.memPct,name:"内存占用",unit:"%",dec:1,color:"#0891b2"}]);
-    drawChart(document.getElementById("chartMemPcie"),[{data:H.memRd,name:"读",unit:" MB/s",dec:0,color:"#2563eb"},{data:H.memWr,name:"写",unit:" MB/s",dec:0,color:"#0891b2"}]);
-    drawChart(document.getElementById("chartMemLoad"),[{data:H.memLoad,name:"提交负载",unit:"%",dec:1,color:"#f59e0b"}]);
+    drawChart(document.getElementById("chartMemPct"),[{data:H.memPct,name:t("内存占用","Memory usage"),unit:"%",dec:1,color:"#0891b2"}]);
+    drawChart(document.getElementById("chartMemPcie"),[{data:H.memRd,name:t("读","Read"),unit:" MB/s",dec:0,color:"#2563eb"},{data:H.memWr,name:t("写","Write"),unit:" MB/s",dec:0,color:"#0891b2"}]);
+    drawChart(document.getElementById("chartMemLoad"),[{data:H.memLoad,name:t("提交负载","Committed load"),unit:"%",dec:1,color:"#f59e0b"}]);
   } else if(activePage==="history"){
-    drawChart(document.getElementById("chartHistPwr"),[{data:Hh.pwrG.map(convPower),name:"GPU",unit:uP(),dec:0,color:"#7c3aed"},{data:Hh.pwrC.map(convPower),name:"CPU",unit:uP(),dec:0,color:"#2563eb"},{data:Hh.pwrT.map(convPower),name:"整机",unit:uP(),dec:0,color:"#16a34a"}]);
+    drawChart(document.getElementById("chartHistPwr"),[{data:Hh.pwrG.map(convPower),name:"GPU",unit:uP(),dec:0,color:"#7c3aed"},{data:Hh.pwrC.map(convPower),name:"CPU",unit:uP(),dec:0,color:"#2563eb"},{data:Hh.pwrT.map(convPower),name:t("整机","System"),unit:uP(),dec:0,color:"#16a34a"}]);
     drawChart(document.getElementById("chartHistUtil"),[{data:Hh.uG,name:"GPU",unit:"%",dec:1,color:"#7c3aed"},{data:Hh.uC,name:"CPU",unit:"%",dec:1,color:"#2563eb"}]);
     drawChart(document.getElementById("chartHistTmp"),[{data:Hh.tG.map(convTemp),name:"GPU",unit:uT(),dec:1,color:"#dc2626"},{data:Hh.tC.map(convTemp),name:"CPU",unit:uT(),dec:1,color:"#f59e0b"}]);
-    drawChart(document.getElementById("chartHistEnergy"),[{data:Hh.eTot,name:"累计能耗",unit:" kWh",dec:2,color:"#0891b2"}]);
-    drawChart(document.getElementById("chartHistCost"),[{data:Hh.cost,name:"电费",unit:" "+CUR(),dec:2,color:"#16a34a"}]);
-    drawChart(document.getElementById("chartHistNet"),[{data:Hh.netRx,name:"收",unit:" MB/s",dec:0,color:"#0891b2"},{data:Hh.netTx,name:"发",unit:" MB/s",dec:0,color:"#7c3aed"}]);
-    drawChart(document.getElementById("chartHistDisk"),[{data:Hh.diskRd,name:"读",unit:" MB/s",dec:0,color:"#2563eb"},{data:Hh.diskWr,name:"写",unit:" MB/s",dec:0,color:"#16a34a"}]);
+    drawChart(document.getElementById("chartHistEnergy"),[{data:Hh.eTot,name:t("累计能耗","Cumulative energy"),unit:" kWh",dec:2,color:"#0891b2"}]);
+    drawChart(document.getElementById("chartHistCost"),[{data:Hh.cost,name:t("电费","Cost"),unit:" "+CUR(),dec:2,color:"#16a34a"}]);
+    drawChart(document.getElementById("chartHistNet"),[{data:Hh.netRx,name:t("收","RX"),unit:" MB/s",dec:0,color:"#0891b2"},{data:Hh.netTx,name:t("发","TX"),unit:" MB/s",dec:0,color:"#7c3aed"}]);
+    drawChart(document.getElementById("chartHistDisk"),[{data:Hh.diskRd,name:t("读","Read"),unit:" MB/s",dec:0,color:"#2563eb"},{data:Hh.diskWr,name:t("写","Write"),unit:" MB/s",dec:0,color:"#16a34a"}]);
   }
 }
 
@@ -1595,7 +1847,7 @@ async function loadHistory(){
       Hh.diskRd.push(r.disk_read_mbs); Hh.diskWr.push(r.disk_write_mbs);
     });
     const span = s.length? (s[s.length-1].ts - s[0].ts) : 0;
-    document.getElementById("histMeta").textContent = `样本 ${s.length} 点 · 跨度 ${fmt(span/3600,1)} 小时`;
+    document.getElementById("histMeta").textContent = t(`样本 {{n}} 点 · 跨度 {{h}} 小时`,`{{n}} samples · span {{h}} h`,{n:s.length, h:fmt(span/3600,1)});
     drawActiveCharts();
   }catch(e){}
 }
@@ -1608,6 +1860,7 @@ function setPage(p){
   if(p==="settings") renderSettings();
   if(p==="history") loadHistory();
   drawActiveCharts();
+  applyTranslations();
 }
 document.querySelectorAll(".nav-item").forEach(a=>a.addEventListener("click",()=>setPage(a.dataset.page)));
 document.querySelectorAll(".hist-range").forEach(b=>b.addEventListener("click",()=>{
@@ -1625,7 +1878,7 @@ function buildGpuCards(){
   const n = (latestGpus&&latestGpus.length)||0;
   // 页标题 (集群视角, 不被单卡详情覆盖)
   const title=document.getElementById("gpuName");
-  if(title) title.textContent = n>1 ? `GPU 监测面板 · 共 ${n} 张卡` : "GPU 监测面板";
+  if(title) title.textContent = n>1 ? t(`GPU 监测面板 · 共 ${n} 张卡`,`GPU Monitor · ${n} cards`): t("GPU 监测面板","GPU Monitor");
   if(n===0){ box.style.display="none"; box.innerHTML=""; return; }
   box.style.display="grid";
   if(selectedGpuIdx>n-1) selectedGpuIdx=n-1;
@@ -1666,7 +1919,7 @@ function buildGpuCards(){
 function renderSettings(){
   fetchJSON("/api/settings").then(d=>{
     if(!d||d.error){ return; }
-    const fmtD=t=> t? new Date(t*1000).toLocaleString("zh-CN",{hour12:false}):"--";
+    const fmtD=t=> t? new Date(t*1000).toLocaleString(locale(),{hour12:false}):"--";
     const sp=document.getElementById("setPrice"); if(sp && !sp._touched) sp.value=d.elec_rate;
     // 偏好填充 (不打断正在编辑的输入框)
     if(d.prefs){ PREFS = Object.assign(PREFS, d.prefs); }
@@ -1683,17 +1936,18 @@ function renderSettings(){
     const as=document.getElementById("setAutostart"); if(as) as.checked=!!d.autostart_active;
     applyPrefs();
     document.getElementById("setMeter").innerHTML=
-      `<div class="row"><span class="k">GPU 累计耗电</span><span class="v">${(d.gpu_energy_wh/1000).toFixed(4)} 度 (${(d.gpu_energy_wh).toFixed(1)} Wh)</span></div>`+
-      `<div class="row"><span class="k">CPU 累计耗电</span><span class="v">${(d.cpu_energy_wh/1000).toFixed(4)} 度 (${(d.cpu_energy_wh).toFixed(1)} Wh)</span></div>`+
-      `<div class="row"><span class="k">合计耗电</span><span class="v">${(d.total_energy_wh/1000).toFixed(4)} 度</span></div>`+
+      `<div class="row"><span class="k">GPU 累计耗电</span><span class="v">${t("{{v}} 度 ({{w}} Wh)","{{v}} kWh ({{w}} Wh)",{v:(d.gpu_energy_wh/1000).toFixed(4), w:(d.gpu_energy_wh).toFixed(1)})}</span></div>`+
+      `<div class="row"><span class="k">CPU 累计耗电</span><span class="v">${t("{{v}} 度 ({{w}} Wh)","{{v}} kWh ({{w}} Wh)",{v:(d.cpu_energy_wh/1000).toFixed(4), w:(d.cpu_energy_wh).toFixed(1)})}</span></div>`+
+      `<div class="row"><span class="k">合计耗电</span><span class="v">${t("{{v}} 度","{{v}} kWh",{v:(d.total_energy_wh/1000).toFixed(4)})}</span></div>`+
       `<div class="row"><span class="k">预估电费</span><span class="v">${CUR()}${d.elec_cost_yuan.toFixed(4)}</span></div>`+
-      `<div class="row"><span class="k">电价</span><span class="v">${CUR()}${d.elec_rate}/度</span></div>`+
+      `<div class="row"><span class="k">电价</span><span class="v">${t("{{r}}/度","{{r}}/kWh",{r:CUR()+d.elec_rate})}</span></div>`+
       `<div class="row"><span class="k">首次记录</span><span class="v">${fmtD(d.first_seen)}</span></div>`+
       `<div class="row"><span class="k">最近更新</span><span class="v">${fmtD(d.updated_at)}</span></div>`;
     const days=Object.entries(d.daily||{}).sort((a,b)=>b[0].localeCompare(a[0])).slice(0,7);
     document.getElementById("setDaily").innerHTML = days.length
-      ? days.map(([k,v])=>`<div class="row"><span class="k">${k}</span><span class="v">${(v/1000).toFixed(3)} 度</span></div>`).join("")
-      : '<div class="row"><span class="k">暂无数据</span><span class="v">--</span></div>';
+      ? days.map(([k,v])=>`<div class="row"><span class="k">${k}</span><span class="v">${(v/1000).toFixed(3)} ${t("度","kWh")}</span></div>`).join("")
+      : '<div class="row"><span class="k">'+t("暂无数据","No data")+'</span><span class="v">--</span></div>';
+    applyTranslations();
   });
 }
 function setVal(id,v){ const e=document.getElementById(id); if(e && v!=null && !e._touched) e.value=v; }
@@ -1744,46 +1998,46 @@ document.getElementById("btnSavePrefs").addEventListener("click",async()=>{
     // 电价一并保存
     const p=parseFloat(document.getElementById("setPrice").value);
     if(!isNaN(p)&&p>0){ await postJSON("/api/settings/price",{price:p}); }
-    setMsg("设置已保存并生效",true);
+    setMsg(t("设置已保存并生效","Settings saved and applied"),true);
     clearTouched(); renderSettings();
-  } else setMsg("保存失败: "+((r&&r.error)||"未知错误"),false);
+  } else setMsg(t("保存失败: {{e}}","Save failed: {{e}}",{e:((r&&r.error)||t("未知错误","unknown error"))}),false);
 });
 document.getElementById("setAutostart").addEventListener("change",async function(){
   const enabled=this.checked;
   const r=await postJSON("/api/settings/autostart",{enabled});
   const st=document.getElementById("autostartState");
-  if(r&&r.ok){ st.textContent=enabled?"已开启开机自启":"已关闭开机自启"; st.style.color="var(--green)"; }
-  else { st.textContent="操作失败: "+((r&&r.error)||"未知"); st.style.color="var(--red)"; this.checked=!enabled; }
+  if(r&&r.ok){ st.textContent=enabled?t("已开启开机自启","Auto-start enabled"):t("已关闭开机自启","Auto-start disabled"); st.style.color="var(--green)"; }
+  else { st.textContent=t("操作失败: {{e}}","Operation failed: {{e}}",{e:((r&&r.error)||t("未知","unknown"))}); st.style.color="var(--red)"; this.checked=!enabled; }
 });
 document.getElementById("btnNotify").addEventListener("click",async()=>{
   const st=document.getElementById("notifyState");
-  if(!("Notification" in window)){ st.textContent="当前浏览器不支持桌面通知"; st.style.color="var(--red)"; return; }
-  if(Notification.permission==="granted"){ st.textContent="桌面通知已启用"; st.style.color="var(--green)"; return; }
-  try{ const perm=await Notification.requestPermission(); st.textContent=(perm==="granted")?"桌面通知已启用":"未授权桌面通知"; st.style.color=(perm==="granted")?"var(--green)":"var(--red)"; }
-  catch(e){ st.textContent="请求通知权限失败"; }
+  if(!("Notification" in window)){ st.textContent=t("当前浏览器不支持桌面通知","This browser does not support desktop notifications"); st.style.color="var(--red)"; return; }
+  if(Notification.permission==="granted"){ st.textContent=t("桌面通知已启用","Desktop notifications enabled"); st.style.color="var(--green)"; return; }
+  try{ const perm=await Notification.requestPermission(); st.textContent=(perm==="granted")?t("桌面通知已启用","Desktop notifications enabled"):t("未授权桌面通知","Desktop notifications not granted"); st.style.color=(perm==="granted")?"var(--green)":"var(--red)"; }
+  catch(e){ st.textContent=t("请求通知权限失败","Failed to request notification permission"); }
 });
 document.getElementById("btnResetMeter").addEventListener("click",async()=>{
-  if(!confirm("确定清除累计能耗与电费？此操作不可撤销。")) return;
+  if(!confirm(t("确定清除累计能耗与电费？此操作不可撤销。","Clear cumulative energy and electricity cost? This cannot be undone."))) return;
   const r=await postJSON("/api/settings/reset_meter",{});
-  if(r&&r.ok){ setMsg("已清除累计能耗与电费",true); renderSettings(); }
-  else setMsg("清除失败",false);
+  if(r&&r.ok){ setMsg(t("已清除累计能耗与电费","Cleared cumulative energy and cost"),true); renderSettings(); }
+  else setMsg(t("清除失败","Clear failed"),false);
 });
 document.getElementById("btnResetAll").addEventListener("click",async()=>{
-  if(!confirm("确定清除全部历史记录（能耗 / 电费 / 每日明细）？电价保留。")) return;
+  if(!confirm(t("确定清除全部历史记录（能耗 / 电费 / 每日明细）？电价保留。","Clear all history (energy / cost / daily breakdown)? Electricity price is kept."))) return;
   const r=await postJSON("/api/settings/reset_all",{});
-  if(r&&r.ok){ setMsg("已清除全部历史记录",true); renderSettings(); }
-  else setMsg("清除失败",false);
+  if(r&&r.ok){ setMsg(t("已清除全部历史记录","All history cleared"),true); renderSettings(); }
+  else setMsg(t("清除失败","Clear failed"),false);
 });
 document.getElementById("btnExport").addEventListener("click",function(){
   const fmt=document.getElementById("expFormat").value;
   const rng=document.getElementById("expRange").value;
   const st=document.getElementById("expState");
-  st.textContent="正在生成下载…"; st.style.color="var(--green)";
+  st.textContent=t("正在生成下载…","Generating download…"); st.style.color="var(--green)";
   const url="/api/export?format="+encodeURIComponent(fmt)+"&range="+encodeURIComponent(rng);
   const a=document.createElement("a");
   a.href=url; a.rel="noopener";
   document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(()=>{ st.textContent="已触发下载（请查看浏览器下载栏）"; }, 600);
+  setTimeout(()=>{ st.textContent=t("已触发下载（请查看浏览器下载栏）","Download triggered (check your browser's download bar)"); }, 600);
 });
 
 /* ---------------- 主循环 ---------------- */
@@ -1808,13 +2062,14 @@ async function tick(){
     pushHist();
     drawActiveCharts();
     if(activePage==="settings") renderSettings();
-  }catch(e){ setStatus("err","连接失败: "+e.message); }
+    applyTranslations();
+  }catch(e){ setStatus("err",t("连接失败: {{e}}","Connection failed: {{e}}",{e:e.message})); }
 }
 function setStatus(type){
   const dot=document.getElementById("dot");
   dot.className="status-dot"+(type==="ok"?"":type==="warn"?" warn":" err");
 }
-function clock(){ document.getElementById("clock").textContent=new Date().toLocaleTimeString("zh-CN",{hour12:false}); }
+function clock(){ document.getElementById("clock").textContent=new Date().toLocaleTimeString(locale(),{hour12:false}); }
 setInterval(clock,1000); clock();
 // 动态刷新频率: 由设置页 refresh_interval 控制
 let _ticker=null;
@@ -1830,7 +2085,7 @@ function loadPrefsOnce(){
     return d;
   });
 }
-loadPrefsOnce().finally(()=>{ tick(); startTicker(); });
+loadPrefsOnce().finally(()=>{ applyTranslations(); tick(); startTicker(); });
 window.addEventListener("resize",()=>{ drawActiveCharts(); });
 </script>
 </body>
