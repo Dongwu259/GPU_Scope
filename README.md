@@ -124,7 +124,7 @@ python tests/test_core.py
 ## 路线图
 
 - [ ] 跨平台（Linux 下 `nvidia-smi` 后端）
-- [ ] 多 GPU 支持（当前只读 index 0）
+- [x] 多 GPU / 多路 CPU 支持（NVML 逐卡轮询 + WMI 逐路解析，GPU / CPU 卡片网格）
 - [ ] 阈值告警（桌面通知 / Webhook）
 - [ ] 系统托盘常驻
 - [ ] CSV / 长期归档导出

@@ -85,6 +85,7 @@ def test_meter_persist():
 def test_history():
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
+    h = None
     try:
         h = gm.History(path, interval=5.0, retention_days=30)
         now = time.time()
@@ -96,17 +97,22 @@ def test_history():
         check("History 24h 查询返回", len(q) == 1)
         if q:
             check("History 字段映射", q[0]["gpu_pw"] == 120.0 and q[0]["total_cost"] == 0.001)
-        # 插入一条很久以前的样本, 应被 query 过滤
+        # 插入一条很久以前的样本, 应被 query 过滤 (samples 表现在 16 列, 需补满)
         old = now - 100 * 86400.0
-        h.conn.execute("INSERT OR REPLACE INTO samples VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                       (old, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1))
+        h.conn.execute(
+            "INSERT OR REPLACE INTO samples VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (old, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1))
         h.conn.commit()
         check("History 范围过滤旧样本", len(h.query("24h")) == 1)
         # 裁剪: 超过 retention_days 的应被删除
         h.prune()
         check("History 裁剪生效", len(h.query("30d")) == 1)
-        h.close()
     finally:
+        if h is not None:
+            try:
+                h.close()
+            except Exception:
+                pass
         os.remove(path)
 
 
