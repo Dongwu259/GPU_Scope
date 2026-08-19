@@ -10,7 +10,22 @@
     --line:#e5e7eb; --accent:#2563eb; --accent2:#7c3aed;
     --green:#16a34a; --amber:#f59e0b; --red:#dc2626; --cyan:#0891b2; --violet:#7c3aed;
     --shadow:0 1px 3px rgba(0,0,0,.08),0 1px 2px rgba(0,0,0,.04);
+    --chart-grid:#eef2f7; --chart-axis:#94a3b8;
   }
+  :root[data-theme="dark"]{
+    --bg:#0b1220; --panel:#152030; --ink:#e6edf6; --muted:#94a3b8;
+    --line:#26344a; --accent:#3b82f6; --accent2:#a78bfa;
+    --green:#22c55e; --amber:#fbbf24; --red:#f87171; --cyan:#22d3ee; --violet:#a78bfa;
+    --shadow:0 1px 3px rgba(0,0,0,.5),0 1px 2px rgba(0,0,0,.35);
+    --chart-grid:#223049; --chart-axis:#7e8aa0;
+  }
+  :root[data-theme="dark"] .chip{background:#1e293b;border-color:#334155;color:#e6edf6}
+  :root[data-theme="dark"] .mini .item{background:#1b2738;border-color:#2a3a52}
+  :root[data-theme="dark"] .gpu-card{background:#152030}
+  :root[data-theme="dark"] .alert{background:#152030}
+  :root[data-theme="dark"] .footer{color:#64748b}
+  :root[data-theme="dark"] .note{color:#94a3b8}
+  :root[data-theme="dark"] .input,:root[data-theme="dark"] .btn{background:#0f172a}
   *{box-sizing:border-box;margin:0;padding:0}
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
     background:var(--bg);color:var(--ink);font-size:14px;line-height:1.45}
@@ -377,12 +392,12 @@
         </div>
         <div class="card metric">
           <div class="label"><span>功率 / 上限</span><span id="pwrPct">--%</span></div>
-          <div class="val"><span id="pwrW">--</span><small> / <span id="pwrLim">--</span> W</small></div>
+          <div class="val"><span id="pwrW">--</span><small> / <span id="pwrLim">--</span></small></div>
           <div class="bar"><i class="b-pwr" id="pwrB2" style="width:0%"></i></div>
         </div>
         <div class="card metric">
           <div class="label"><span>温度 / 上限</span><span id="tmpPct">--%</span></div>
-          <div class="val"><span id="tmpC">--</span><small> / <span id="tmpLim">--</span> °C</small></div>
+          <div class="val"><span id="tmpC">--</span><small> / <span id="tmpLim">--</span></small></div>
           <div class="bar"><i class="b-tmp" id="tmpB2" style="width:0%"></i></div>
         </div>
       </div>
@@ -401,7 +416,7 @@
         <div class="card">
           <h3>功率 / 温度</h3>
           <canvas id="chartPwr"></canvas>
-          <div class="legend"><span><i style="background:var(--amber)"></i>功率 W</span><span><i style="background:var(--red)"></i>温度 °C</span></div>
+          <div class="legend" id="lgGpuPwrTmp"><span><i style="background:var(--amber)"></i>功率</span><span><i style="background:var(--red)"></i>温度</span></div>
         </div>
       </div>
 
@@ -722,26 +737,111 @@
     <section id="page-settings" class="page" hidden>
       <div class="page-head">
         <h2>设置</h2>
-        <div class="sub">历史 / 能耗持久化 · 累计清除 · 电价设置</div>
+        <div class="sub">采集 · 显示 · 告警 · 自启 · 数据管理</div>
       </div>
 
       <div class="grid hero" style="margin-bottom:14px">
+        <div class="card">
+          <h3>采集与历史采样</h3>
+          <div class="metric" style="margin-bottom:12px">
+            <div class="label"><span>采样间隔 (秒)</span></div>
+            <input id="setSampInt" class="input" type="number" min="0.1" max="10" step="0.1" />
+            <div class="note" style="margin-top:4px">GPU 轮询频率，越大越省资源（0.1–10）</div>
+          </div>
+          <div class="metric" style="margin-bottom:12px">
+            <div class="label"><span>历史采样间隔 (秒)</span></div>
+            <input id="setHistInt" class="input" type="number" min="1" max="300" step="1" />
+            <div class="note" style="margin-top:4px">写入历史库的间隔（1–300）</div>
+          </div>
+          <div class="metric">
+            <div class="label"><span>历史保留天数</span></div>
+            <input id="setRetain" class="input" type="number" min="1" max="3650" step="1" />
+            <div class="note" style="margin-top:4px">超过该天数的历史样本自动清理（1–3650）</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>显示偏好</h3>
+          <div class="metric" style="margin-bottom:12px">
+            <div class="label"><span>温度单位</span></div>
+            <select id="setTempUnit" class="input">
+              <option value="C">摄氏度 °C</option>
+              <option value="F">华氏度 °F</option>
+            </select>
+          </div>
+          <div class="metric" style="margin-bottom:12px">
+            <div class="label"><span>功率单位</span></div>
+            <select id="setPowerUnit" class="input">
+              <option value="W">瓦特 W</option>
+              <option value="kW">千瓦 kW</option>
+            </select>
+          </div>
+          <div class="metric" style="margin-bottom:12px">
+            <div class="label"><span>货币符号</span></div>
+            <input id="setCurrency" class="input" type="text" maxlength="3" />
+            <div class="note" style="margin-top:4px">电费显示前缀（如 ¥ / $ / €）</div>
+          </div>
+          <div class="metric" style="margin-bottom:12px">
+            <div class="label"><span>界面主题</span></div>
+            <select id="setTheme" class="input">
+              <option value="auto">跟随系统</option>
+              <option value="light">浅色</option>
+              <option value="dark">深色</option>
+            </select>
+          </div>
+          <div class="metric">
+            <div class="label"><span>面板刷新频率 (秒)</span></div>
+            <input id="setRefresh" class="input" type="number" min="0.5" max="10" step="0.5" />
+            <div class="note" style="margin-top:4px">前端拉取接口的频率（0.5–10）</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid hero" style="margin-bottom:14px">
+        <div class="card">
+          <h3>告警阈值</h3>
+          <div class="metric" style="margin-bottom:12px">
+            <div class="label"><span>GPU 温度告警 (°C，0=关闭)</span></div>
+            <input id="setAlertTemp" class="input" type="number" min="0" max="120" step="1" />
+          </div>
+          <div class="metric" style="margin-bottom:12px">
+            <div class="label"><span>GPU 利用率低于告警 (%，0=关闭)</span></div>
+            <input id="setAlertUtil" class="input" type="number" min="0" max="100" step="1" />
+            <div class="note" style="margin-top:4px">利用率长期低于该值（疑似掉卡 / 闲置）时高亮提示</div>
+          </div>
+          <button id="btnNotify" class="btn">启用浏览器桌面通知</button>
+          <div id="notifyState" class="note" style="margin-top:8px"></div>
+        </div>
+
+        <div class="card">
+          <h3>开机自启 <span class="tag">Windows</span></h3>
+          <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:14px">
+            <input id="setAutostart" type="checkbox" style="width:18px;height:18px" />
+            <span>登录 Windows 时自动启动 GPU_Scope 监测服务</span>
+          </label>
+          <div class="note" style="margin-top:12px">实现方式：将 <code>start_gpu_monitor.bat</code> 复制到「启动」文件夹。仅 Windows 有效，其他系统忽略。</div>
+          <div id="autostartState" class="note" style="margin-top:8px"></div>
+        </div>
+      </div>
+
+      <div class="grid hero" style="margin-bottom:14px">
+        <div class="card">
+          <h3>电价设置</h3>
+          <div class="metric">
+            <div class="label"><span>电价 (<span id="setCurLabel">¥</span> / 度)</span></div>
+            <input id="setPrice" class="input" type="number" min="0.01" step="0.01" />
+          </div>
+          <div class="note" style="margin-top:12px">电费 = 累计度数 × 电价，修改后写入 meter.json 持久化。</div>
+        </div>
         <div class="card">
           <h3>持久化计量状态 <span class="tag">跨重启保存于 meter.json</span></h3>
           <div class="kv" id="setMeter">
             <div class="row"><span class="k">加载中…</span><span class="v">--</span></div>
           </div>
         </div>
-        <div class="card">
-          <h3>电价设置</h3>
-          <div class="metric">
-            <div class="label"><span>电价 (元 / 度)</span></div>
-            <input id="setPrice" class="input" type="number" min="0.01" step="0.01" />
-          </div>
-          <button id="btnSavePrice" class="btn" style="margin-top:14px">保存电价</button>
-          <div class="note" style="margin-top:12px">电价修改后立即生效，并写入 meter.json 持久化，重启后保留。电费 = 累计度数 × 电价。</div>
-        </div>
       </div>
+
+      <button id="btnSavePrefs" class="btn" style="background:var(--accent);color:#fff;margin-bottom:14px">保存全部设置</button>
 
       <div class="card" style="margin-bottom:14px">
         <h3>每日耗电明细 <span class="tag">最近 7 天</span></h3>
@@ -794,7 +894,39 @@ let curFlops = null, latestCpu = null, latestMem = null;
 let latestGpu = null, latestGpus = [], latestCluster = null, selectedGpuIdx = 0, selectedCpuIdx = 0;
 let procData = [], procSort = {key: "vram_mb", dir: -1};
 let histRange = "24h";
+let _notifKey = "", _notifTs = 0;   // 告警通知去重
 let Hh = {pwrG:[],pwrC:[],pwrT:[],uG:[],uC:[],tG:[],tC:[],eTot:[],cost:[],netRx:[],netTx:[],diskRd:[],diskWr:[]};
+
+// 用户偏好 (由 /api/settings 返回, 默认浅色/公制/¥)
+let PREFS = { temp_unit:"C", power_unit:"W", currency:"¥", theme:"auto",
+              refresh_interval:1.0, alert_temp:0, alert_util_low:0 };
+
+function fmtTemp(c){ if(c==null||isNaN(c)) return "--"; return PREFS.temp_unit==="F" ? (c*9/5+32).toFixed(0)+" °F" : c.toFixed(0)+" °C"; }
+function fmtPower(w){ if(w==null||isNaN(w)) return "--"; return PREFS.power_unit==="kW" && w>=1000 ? (w/1000).toFixed(2)+" kW" : w.toFixed(0)+" W"; }
+function CUR(){ return PREFS.currency || "¥"; }
+// 图表数据换算 (内部数据恒为基准单位 C / W, 绘制前按需转换)
+function convTemp(v){ return (v==null||isNaN(v)) ? null : (PREFS.temp_unit==="F" ? v*9/5+32 : v); }
+function convPower(v){ return (v==null||isNaN(v)) ? null : (PREFS.power_unit==="kW" ? v/1000 : v); }
+function uT(){ return PREFS.temp_unit==="F" ? " °F" : " °C"; }
+function uP(){ return PREFS.power_unit==="kW" ? " kW" : " W"; }
+
+function applyTheme(t){
+  let v = t || "auto";
+  if(v === "auto"){
+    const mq = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)");
+    v = (mq && mq.matches) ? "dark" : "light";
+  }
+  document.documentElement.setAttribute("data-theme", v);
+}
+function refreshLegends(){
+  const lg = document.getElementById("lgGpuPwrTmp");
+  if(lg) lg.innerHTML = `<span><i style="background:var(--amber)"></i>功率${uP()}</span><span><i style="background:var(--red)"></i>温度${uT()}</span>`;
+}
+function applyPrefs(){
+  applyTheme(PREFS.theme);
+  const cl = document.getElementById("setCurLabel"); if(cl) cl.textContent = CUR();
+  refreshLegends();
+}
 
 function setBar(id,pct){ const e=document.getElementById(id); if(e) e.style.width=Math.max(0,Math.min(100,pct))+"%"; }
 function fmt(n,d=2){ return (n==null||isNaN(n))?"--":Number(n).toFixed(d); }
@@ -839,8 +971,11 @@ function drawChart(canvas, series){
   const units=series.map(s=>s.unit||"");
   if(units.length && units.every(u=>u===units[0]) && units[0]!=="") commonUnit=units[0];
 
-  // y 轴网格 + 刻度数值
-  ctx.strokeStyle="#eef2f7"; ctx.lineWidth=1; ctx.fillStyle="#94a3b8"; ctx.font="10px sans-serif";
+  // y 轴网格 + 刻度数值 (主题感知: 读取 CSS 变量)
+  const css=getComputedStyle(document.documentElement);
+  const gridCol=css.getPropertyValue("--chart-grid").trim()||"#eef2f7";
+  const axisCol=css.getPropertyValue("--chart-axis").trim()||"#94a3b8";
+  ctx.strokeStyle=gridCol; ctx.lineWidth=1; ctx.fillStyle=axisCol; ctx.font="10px sans-serif";
   ctx.textAlign="right"; ctx.textBaseline="middle";
   const ticks=3;
   for(let i=0;i<=ticks;i++){
@@ -849,7 +984,7 @@ function drawChart(canvas, series){
     const val=maxV*(1-i/ticks);
     ctx.fillText(fmtAxis(val), padL-5, y);
   }
-  if(commonUnit){ ctx.textAlign="left"; ctx.textBaseline="alphabetic"; ctx.fillStyle="#94a3b8";
+  if(commonUnit){ ctx.textAlign="left"; ctx.textBaseline="alphabetic"; ctx.fillStyle=axisCol;
     ctx.fillText(commonUnit, padL+2, padT-3); }
 
   // 折线 (按各自数据长度映射到整宽, 兼容历史 > MAXPTS 点)
@@ -976,10 +1111,10 @@ function renderGpu(g){
   const uG=g.utilization.gpu, uM=g.utilization.memory;
   document.getElementById("uGpuV").textContent=uG+"%"; setBar("uGpuB",uG);
   document.getElementById("uMemV").textContent=uM+"%"; setBar("uMemB",uM);
-  if(g.power.limit_watts){ const pp=g.power.watts/g.power.limit_watts*100; document.getElementById("pwrV").textContent=g.power.watts+" W"; setBar("pwrB",pp); }
-  else document.getElementById("pwrV").textContent=g.power.watts+" W";
+  if(g.power.limit_watts){ const pp=g.power.watts/g.power.limit_watts*100; document.getElementById("pwrV").textContent=fmtPower(g.power.watts); setBar("pwrB",pp); }
+  else document.getElementById("pwrV").textContent=fmtPower(g.power.watts);
   const tp=g.temperature.c, tlim=g.temperature.limit_c||100;
-  document.getElementById("tmpV").textContent=tp+" °C"; setBar("tmpB",tp/tlim*100);
+  document.getElementById("tmpV").textContent=fmtTemp(tp); setBar("tmpB",tp/tlim*100);
   document.getElementById("clkSm").textContent=g.clocks.sm_mhz||"--";
   document.getElementById("clkMem").textContent=g.clocks.mem_mhz||"--";
   document.getElementById("fan").textContent=g.fan_percent!=null?g.fan_percent:"--";
@@ -1007,11 +1142,11 @@ function renderGpu(g){
   setBar("bwB",bwPct);
   if(g.power.limit_watts){ const pctp=g.power.watts/g.power.limit_watts*100;
     document.getElementById("pwrPct").textContent=pctp.toFixed(1)+"%";
-    document.getElementById("pwrW").textContent=g.power.watts;
-    document.getElementById("pwrLim").textContent=g.power.limit_watts; setBar("pwrB2",pctp); }
+    document.getElementById("pwrW").textContent=fmtPower(g.power.watts);
+    document.getElementById("pwrLim").textContent=fmtPower(g.power.limit_watts); setBar("pwrB2",pctp); }
   const tPct=tp/tlim*100;
   document.getElementById("tmpPct").textContent=tPct.toFixed(1)+"%";
-  document.getElementById("tmpC").textContent=tp; document.getElementById("tmpLim").textContent=tlim; setBar("tmpB2",tPct);
+  document.getElementById("tmpC").textContent=fmtTemp(tp); document.getElementById("tmpLim").textContent=fmtTemp(tlim); setBar("tmpB2",tPct);
 
   const e=g.media.encoder_percent, d=g.media.decoder_percent;
   document.getElementById("encV").textContent=pct(e); setBar("encB",e||0,"var(--violet)");
@@ -1023,7 +1158,7 @@ function renderGpu(g){
   document.getElementById("pcieTp").textContent=(s.pcie_rx_mbs!=null&&s.pcie_tx_mbs!=null)?(`${s.pcie_rx_mbs} / ${s.pcie_tx_mbs} MB/s`):"--";
   document.getElementById("bar1").textContent=(s.bar1_used_gib!=null)?(`${s.bar1_used_gib} / ${s.bar1_total_gib} GiB`):"--";
   document.getElementById("energy").textContent=(s.energy_kwh_cum!=null)?(`${s.energy_kwh_cum} 度 (${s.energy_wh_cum} Wh)`):"--";
-  document.getElementById("cost").textContent=(s.elec_cost_cum!=null)?(`¥${s.elec_cost_cum.toFixed(4)} @¥${s.elec_rate_yuan_per_kwh}/度`):"--";
+  document.getElementById("cost").textContent=(s.elec_cost_cum!=null)?(`${CUR()}${s.elec_cost_cum.toFixed(4)} @${CUR()}${s.elec_rate_yuan_per_kwh}/度`):"--";
   document.getElementById("avgPwr").textContent=(s.avg_power_since_start_w!=null)?(`${s.avg_power_since_start_w} W`):"--";
 
   // 瓶颈分析
@@ -1056,12 +1191,23 @@ function renderGpu(g){
   procData = (g.processes && g.processes.length) ? g.processes.slice() : [];
   renderProcTable();
 
-  // 告警
+  // 告警 (节流 + 温度/利用率阈值)
   const al=document.getElementById("alert");
+  const msgs=[];
   if(g.throttle_reasons&&g.throttle_reasons.length){
-    al.className="alert show";
-    al.innerHTML="⚠ <b>时钟节流中：</b>"+g.throttle_reasons.join("、")+"。算力可能低于峰值，请检查供电 / 散热 / 功率上限。";
-    setStatus("warn");
+    msgs.push("⚠ <b>时钟节流中：</b>"+g.throttle_reasons.join("、")+"。算力可能低于峰值，请检查供电 / 散热 / 功率上限。");
+  }
+  const at=PREFS.alert_temp||0, au=PREFS.alert_util_low||0;
+  if(at>0 && tp>=at) msgs.push("🌡 GPU 温度 "+fmtTemp(tp)+" 已达告警阈值 "+at+"°C，注意散热。");
+  if(au>0 && uG<au) msgs.push("🐢 GPU 利用率仅 "+uG+"%，低于告警阈值 "+au+"%，疑似掉卡或闲置。");
+  if(msgs.length){
+    al.className="alert show"; al.innerHTML=msgs.join("<br>"); setStatus("warn");
+    // 桌面通知 (节流: 同一组合 60s 内只发一次)
+    if(("Notification" in window) && Notification.permission==="granted"){
+      const key=(at>0&&tp>=at?"T":"")+(au>0&&uG<au?"U":"")+(g.throttle_reasons&&g.throttle_reasons.length?"H":"");
+      const now=Date.now();
+      if(_notifKey!==key || now-_notifTs>60000){ _notifKey=key; _notifTs=now; try{ new Notification("GPU_Scope 告警",{body:msgs[0]}); }catch(e){} }
+    }
   } else { al.className="alert"; setStatus(uG>3?"ok":"warn"); }
 }
 
@@ -1140,11 +1286,11 @@ function renderCpu(d){
 
   const u=csUtil, pw=csPw, tmp=d.temperature_c, volt=d.voltage_v;
   document.getElementById("cpuUtilV").textContent=u+"%"; setBar("cpuUtilB",u);
-  document.getElementById("cpuPwrV").textContent=pw!=null?(pw+" W"):"--"; setBar("cpuPwrB",(pw&&csTdp)?Math.min(100,pw/(csTdp*1.3)*100):0);
+  document.getElementById("cpuPwrV").textContent=pw!=null?fmtPower(pw):"--"; setBar("cpuPwrB",(pw&&csTdp)?Math.min(100,pw/(csTdp*1.3)*100):0);
   const lhmAvail = !!(d.lhm && d.lhm.available);
   if(tmp==null){ document.getElementById("cpuTmpV").textContent="N/A"; setBar("cpuTmpB",0);
     const ts=document.getElementById("cpuTmpStatus"); ts.textContent="N/A (无传感器)"; ts.className="v warn"; }
-  else { document.getElementById("cpuTmpV").textContent=tmp+" °C"; setBar("cpuTmpB",Math.min(100,tmp/100*100));
+  else { document.getElementById("cpuTmpV").textContent=fmtTemp(tmp); setBar("cpuTmpB",Math.min(100,tmp/100*100));
     const ts=document.getElementById("cpuTmpStatus"); ts.textContent=(tmp>85?"过热":"正常")+(lhmAvail?" · LHM实测":""); ts.className="v "+(tmp>85?"bad":"ok"); }
   const lhmNote=document.getElementById("cpuLhmNote");
   if(lhmAvail){ lhmNote.style.color="var(--green)"; lhmNote.textContent="✓ 已接入 LibreHardwareMonitor（"+d.lhm.method+"），CPU 温度与功率为实测值。"; }
@@ -1163,8 +1309,8 @@ function renderCpu(d){
   document.getElementById("cpuAvx2Eff").textContent=fmt(c.avx2_effective_gflops,0)+" GFLOPS";
 
   document.getElementById("cpuEnergy").textContent=(d.energy_kwh!=null)?(`${d.energy_kwh} 度 (${d.energy_wh} Wh)`):"--";
-  document.getElementById("cpuCost").textContent=(d.electricity_cost_yuan!=null)?(`¥${d.electricity_cost_yuan} @¥${d.elec_rate_yuan_per_kwh}/度`):"--";
-  document.getElementById("cpuRate").textContent=(d.elec_rate_yuan_per_kwh!=null)?(`¥${d.elec_rate_yuan_per_kwh}/度`):"--";
+  document.getElementById("cpuCost").textContent=(d.electricity_cost_yuan!=null)?(`${CUR()}${d.electricity_cost_yuan} @${CUR()}${d.elec_rate_yuan_per_kwh}/度`):"--";
+  document.getElementById("cpuRate").textContent=(d.elec_rate_yuan_per_kwh!=null)?(`${CUR()}${d.elec_rate_yuan_per_kwh}/度`):"--";
 
   // 每核心
   const per=d.per_core||[];
@@ -1199,7 +1345,7 @@ function buildCpuCards(){
     return `<div class="gpu-card${active}" data-idx="${i}">
       <div class="gpu-card-top">
         <span class="gpu-idx">CPU ${i}</span>
-        <span class="gpu-ef">${pw!=null? fmt(pw,0)+" W" : "--"}</span>
+        <span class="gpu-ef">${pw!=null? fmtPower(pw) : "--"}</span>
       </div>
       <div class="gpu-model">${nm}</div>
       <div class="gpu-metrics">
@@ -1234,7 +1380,7 @@ function renderMem(d){
   document.getElementById("memLoad").textContent=d.load_percent!=null?d.load_percent+"%":"N/A";
   document.getElementById("memFreq2").textContent=d.speed_mhz?d.speed_mhz+" MHz":"--";
   if(d.temperature_c==null){ document.getElementById("memTmp").textContent="N/A"; }
-  else document.getElementById("memTmp").textContent=d.temperature_c+" °C";
+  else document.getElementById("memTmp").textContent=fmtTemp(d.temperature_c);
   document.getElementById("memRd").textContent=d.pcie_read_mbs!=null?d.pcie_read_mbs+" MB/s":"--";
   document.getElementById("memWr").textContent=d.pcie_write_mbs!=null?d.pcie_write_mbs+" MB/s":"--";
 
@@ -1281,7 +1427,7 @@ function renderOverview(){
   document.getElementById("ovEnergy").textContent=fmt(totalEnergy/1000,4);
   document.getElementById("ovGpuEnergy").textContent=fmt(gpuEnergy/1000,4);
   document.getElementById("ovCpuEnergy").textContent=fmt(cpuEnergy/1000,4);
-  document.getElementById("ovCost").textContent="¥"+fmt(cost,4);
+  document.getElementById("ovCost").textContent=CUR()+fmt(cost,4);
 
   if(gc){
     document.getElementById("ovGpuUtil").textContent=ovGpuUtilVal.toFixed(1)+"%";
@@ -1299,8 +1445,8 @@ function renderOverview(){
     document.getElementById("ovMemUsed").textContent=m.used_gib;
     document.getElementById("ovMemTot").textContent=m.total_gib;
   }
-  document.getElementById("ovPwr2").textContent=fmt(totalPwr,0)+" W";
-  document.getElementById("ovCost2").textContent="¥"+fmt(cost,3);
+  document.getElementById("ovPwr2").textContent=fmtPower(totalPwr);
+  document.getElementById("ovCost2").textContent=CUR()+fmt(cost,3);
   const pmax = (g&&g.power.limit_watts?g.power.limit_watts:400) + (c&&c.tdp_w?c.tdp_w*1.3:200);
   setBar("ovPwrB", totalPwr/pmax*100);
 
@@ -1380,30 +1526,30 @@ function renderOverview(){
 /* ---------------- 图表绘制 (仅当前页) ---------------- */
 function drawActiveCharts(){
   if(activePage==="overview"){
-    drawChart(document.getElementById("chartOvPwr"),[{data:H.totalPwr,name:"整机功率",unit:" W",dec:0,color:"#7c3aed"}]);
-    drawChart(document.getElementById("chartOvSplit"),[{data:H.gpuPwrTot,name:"GPU",unit:" W",dec:0,color:"#7c3aed"},{data:H.cpuPwr,name:"CPU",unit:" W",dec:0,color:"#2563eb"}]);
+    drawChart(document.getElementById("chartOvPwr"),[{data:H.totalPwr.map(convPower),name:"整机功率",unit:uP(),dec:0,color:"#7c3aed"}]);
+    drawChart(document.getElementById("chartOvSplit"),[{data:H.gpuPwrTot.map(convPower),name:"GPU",unit:uP(),dec:0,color:"#7c3aed"},{data:H.cpuPwr.map(convPower),name:"CPU",unit:uP(),dec:0,color:"#2563eb"}]);
     drawChart(document.getElementById("chartOvUtil"),[{data:H.gpuUtilAvg,name:"GPU",unit:"%",dec:1,color:"#7c3aed"},{data:H.cpuUtil,name:"CPU",unit:"%",dec:1,color:"#2563eb"},{data:H.memLoad,name:"内存",unit:"%",dec:1,color:"#0891b2"}]);
   } else if(activePage==="gpu"){
     drawChart(document.getElementById("chartFlops"),[{data:H.flops,name:"等效算力",unit:" TFLOPS",dec:1,color:"#7c3aed"}]);
     drawChart(document.getElementById("chartUtil"),[{data:H.gpu,name:"GPU 利用率",unit:"%",dec:1,color:"#2563eb"},{data:H.mem,name:"显存活动",unit:"%",dec:1,color:"#0891b2"}]);
-    drawChart(document.getElementById("chartPwr"),[{data:H.pwr,name:"功率",unit:" W",dec:0,color:"#f59e0b"},{data:H.tmp,name:"温度",unit:" °C",dec:1,color:"#dc2626"}]);
+    drawChart(document.getElementById("chartPwr"),[{data:H.pwr.map(convPower),name:"功率",unit:uP(),dec:0,color:"#f59e0b"},{data:H.tmp.map(convTemp),name:"温度",unit:uT(),dec:1,color:"#dc2626"}]);
     drawChart(document.getElementById("chartClk"),[{data:H.smclk,name:"SM 时钟",unit:" MHz",dec:0,color:"#2563eb"},{data:H.memclk,name:"显存时钟",unit:" MHz",dec:0,color:"#0891b2"}]);
     drawChart(document.getElementById("chartMedia"),[{data:H.enc,name:"NVENC",unit:"%",dec:1,color:"#7c3aed"},{data:H.dec,name:"NVDEC",unit:"%",dec:1,color:"#16a34a"}]);
     drawChart(document.getElementById("chartBw"),[{data:H.bw,name:"带宽",unit:" GB/s",dec:1,color:"#0ea5e9"}]);
   } else if(activePage==="cpu"){
     drawChart(document.getElementById("chartCpuUtil"),[{data:H.cpuUtil,name:"CPU 利用率",unit:"%",dec:1,color:"#2563eb"}]);
-    drawChart(document.getElementById("chartCpuPwr"),[{data:H.cpuPwr,name:"CPU 功率",unit:" W",dec:0,color:"#f59e0b"}]);
+    drawChart(document.getElementById("chartCpuPwr"),[{data:H.cpuPwr.map(convPower),name:"CPU 功率",unit:uP(),dec:0,color:"#f59e0b"}]);
     drawChart(document.getElementById("chartCpuFreq"),[{data:H.cpuFreq,name:"频率",unit:" MHz",dec:0,color:"#7c3aed"}]);
   } else if(activePage==="mem"){
     drawChart(document.getElementById("chartMemPct"),[{data:H.memPct,name:"内存占用",unit:"%",dec:1,color:"#0891b2"}]);
     drawChart(document.getElementById("chartMemPcie"),[{data:H.memRd,name:"读",unit:" MB/s",dec:0,color:"#2563eb"},{data:H.memWr,name:"写",unit:" MB/s",dec:0,color:"#0891b2"}]);
     drawChart(document.getElementById("chartMemLoad"),[{data:H.memLoad,name:"提交负载",unit:"%",dec:1,color:"#f59e0b"}]);
   } else if(activePage==="history"){
-    drawChart(document.getElementById("chartHistPwr"),[{data:Hh.pwrG,name:"GPU",unit:" W",dec:0,color:"#7c3aed"},{data:Hh.pwrC,name:"CPU",unit:" W",dec:0,color:"#2563eb"},{data:Hh.pwrT,name:"整机",unit:" W",dec:0,color:"#16a34a"}]);
+    drawChart(document.getElementById("chartHistPwr"),[{data:Hh.pwrG.map(convPower),name:"GPU",unit:uP(),dec:0,color:"#7c3aed"},{data:Hh.pwrC.map(convPower),name:"CPU",unit:uP(),dec:0,color:"#2563eb"},{data:Hh.pwrT.map(convPower),name:"整机",unit:uP(),dec:0,color:"#16a34a"}]);
     drawChart(document.getElementById("chartHistUtil"),[{data:Hh.uG,name:"GPU",unit:"%",dec:1,color:"#7c3aed"},{data:Hh.uC,name:"CPU",unit:"%",dec:1,color:"#2563eb"}]);
-    drawChart(document.getElementById("chartHistTmp"),[{data:Hh.tG,name:"GPU",unit:" °C",dec:1,color:"#dc2626"},{data:Hh.tC,name:"CPU",unit:" °C",dec:1,color:"#f59e0b"}]);
+    drawChart(document.getElementById("chartHistTmp"),[{data:Hh.tG.map(convTemp),name:"GPU",unit:uT(),dec:1,color:"#dc2626"},{data:Hh.tC.map(convTemp),name:"CPU",unit:uT(),dec:1,color:"#f59e0b"}]);
     drawChart(document.getElementById("chartHistEnergy"),[{data:Hh.eTot,name:"累计能耗",unit:" kWh",dec:2,color:"#0891b2"}]);
-    drawChart(document.getElementById("chartHistCost"),[{data:Hh.cost,name:"电费",unit:" ¥",dec:2,color:"#16a34a"}]);
+    drawChart(document.getElementById("chartHistCost"),[{data:Hh.cost,name:"电费",unit:" "+CUR(),dec:2,color:"#16a34a"}]);
     drawChart(document.getElementById("chartHistNet"),[{data:Hh.netRx,name:"收",unit:" MB/s",dec:0,color:"#0891b2"},{data:Hh.netTx,name:"发",unit:" MB/s",dec:0,color:"#7c3aed"}]);
     drawChart(document.getElementById("chartHistDisk"),[{data:Hh.diskRd,name:"读",unit:" MB/s",dec:0,color:"#2563eb"},{data:Hh.diskWr,name:"写",unit:" MB/s",dec:0,color:"#16a34a"}]);
   }
@@ -1500,12 +1646,26 @@ function renderSettings(){
     if(!d||d.error){ return; }
     const fmtD=t=> t? new Date(t*1000).toLocaleString("zh-CN",{hour12:false}):"--";
     const sp=document.getElementById("setPrice"); if(sp && !sp._touched) sp.value=d.elec_rate;
+    // 偏好填充 (不打断正在编辑的输入框)
+    if(d.prefs){ PREFS = Object.assign(PREFS, d.prefs); }
+    setVal("setSampInt", d.prefs && d.prefs.sampling_interval);
+    setVal("setHistInt", d.prefs && d.prefs.hist_interval);
+    setVal("setRetain", d.prefs && d.prefs.hist_retention_days);
+    setSel("setTempUnit", d.prefs && d.prefs.temp_unit);
+    setSel("setPowerUnit", d.prefs && d.prefs.power_unit);
+    setVal("setCurrency", d.prefs && d.prefs.currency);
+    setSel("setTheme", d.prefs && d.prefs.theme);
+    setVal("setRefresh", d.prefs && d.prefs.refresh_interval);
+    setVal("setAlertTemp", d.prefs && d.prefs.alert_temp);
+    setVal("setAlertUtil", d.prefs && d.prefs.alert_util_low);
+    const as=document.getElementById("setAutostart"); if(as) as.checked=!!d.autostart_active;
+    applyPrefs();
     document.getElementById("setMeter").innerHTML=
       `<div class="row"><span class="k">GPU 累计耗电</span><span class="v">${(d.gpu_energy_wh/1000).toFixed(4)} 度 (${(d.gpu_energy_wh).toFixed(1)} Wh)</span></div>`+
       `<div class="row"><span class="k">CPU 累计耗电</span><span class="v">${(d.cpu_energy_wh/1000).toFixed(4)} 度 (${(d.cpu_energy_wh).toFixed(1)} Wh)</span></div>`+
       `<div class="row"><span class="k">合计耗电</span><span class="v">${(d.total_energy_wh/1000).toFixed(4)} 度</span></div>`+
-      `<div class="row"><span class="k">预估电费</span><span class="v">¥${d.elec_cost_yuan.toFixed(4)}</span></div>`+
-      `<div class="row"><span class="k">电价</span><span class="v">¥${d.elec_rate}/度</span></div>`+
+      `<div class="row"><span class="k">预估电费</span><span class="v">${CUR()}${d.elec_cost_yuan.toFixed(4)}</span></div>`+
+      `<div class="row"><span class="k">电价</span><span class="v">${CUR()}${d.elec_rate}/度</span></div>`+
       `<div class="row"><span class="k">首次记录</span><span class="v">${fmtD(d.first_seen)}</span></div>`+
       `<div class="row"><span class="k">最近更新</span><span class="v">${fmtD(d.updated_at)}</span></div>`;
     const days=Object.entries(d.daily||{}).sort((a,b)=>b[0].localeCompare(a[0])).slice(0,7);
@@ -1514,6 +1674,12 @@ function renderSettings(){
       : '<div class="row"><span class="k">暂无数据</span><span class="v">--</span></div>';
   });
 }
+function setVal(id,v){ const e=document.getElementById(id); if(e && v!=null && !e._touched) e.value=v; }
+function setSel(id,v){ const e=document.getElementById(id); if(e && v!=null) e.value=v; }
+function num(id,def){ const e=document.getElementById(id); const v=parseFloat(e&&e.value); return isNaN(v)?def:v; }
+function str(id,def){ const e=document.getElementById(id); return (e&&e.value!=null&&e.value!=="")?e.value:def; }
+function clearTouched(){ ["setSampInt","setHistInt","setRetain","setTempUnit","setPowerUnit","setCurrency","setTheme","setRefresh","setAlertTemp","setAlertUtil","setPrice"].forEach(id=>{const e=document.getElementById(id); if(e) e._touched=false;}); }
+
 function setMsg(text, ok){
   const e=document.getElementById("setMsg");
   e.style.display="block"; e.className="alert show";
@@ -1532,13 +1698,47 @@ async function postJSON(url, body){
   }catch(e){ return {error:e.message}; }
 }
 const API_TOKEN = "__API_TOKEN__";
-document.getElementById("setPrice").addEventListener("input",function(){ this._touched=true; });
-document.getElementById("btnSavePrice").addEventListener("click",async()=>{
-  const p=parseFloat(document.getElementById("setPrice").value);
-  if(isNaN(p)||p<=0){ setMsg("请输入有效电价 (正数)",false); return; }
-  const r=await postJSON("/api/settings/price",{price:p});
-  if(r&&r.ok){ setMsg("电价已保存为 ¥"+r.elec_rate+"/度",true); renderSettings(); }
-  else setMsg("保存失败: "+((r&&r.error)||"未知错误"),false);
+// 给所有设置输入框绑定 _touched 标志, 渲染时不被覆盖
+["setSampInt","setHistInt","setRetain","setTempUnit","setPowerUnit","setCurrency","setTheme","setRefresh","setAlertTemp","setAlertUtil","setPrice"].forEach(id=>{
+  const e=document.getElementById(id); if(e) e.addEventListener("input",function(){ this._touched=true; });
+});
+document.getElementById("btnSavePrefs").addEventListener("click",async()=>{
+  const patch={
+    sampling_interval: num("setSampInt",0.5),
+    hist_interval: num("setHistInt",5.0),
+    hist_retention_days: num("setRetain",30),
+    temp_unit: str("setTempUnit","C"),
+    power_unit: str("setPowerUnit","W"),
+    currency: str("setCurrency","¥"),
+    theme: str("setTheme","auto"),
+    refresh_interval: num("setRefresh",1.0),
+    alert_temp: num("setAlertTemp",0),
+    alert_util_low: num("setAlertUtil",0),
+  };
+  const r=await postJSON("/api/settings/prefs",patch);
+  if(r&&r.ok){
+    PREFS=Object.assign(PREFS,r.prefs);
+    applyPrefs(); startTicker();
+    // 电价一并保存
+    const p=parseFloat(document.getElementById("setPrice").value);
+    if(!isNaN(p)&&p>0){ await postJSON("/api/settings/price",{price:p}); }
+    setMsg("设置已保存并生效",true);
+    clearTouched(); renderSettings();
+  } else setMsg("保存失败: "+((r&&r.error)||"未知错误"),false);
+});
+document.getElementById("setAutostart").addEventListener("change",async function(){
+  const enabled=this.checked;
+  const r=await postJSON("/api/settings/autostart",{enabled});
+  const st=document.getElementById("autostartState");
+  if(r&&r.ok){ st.textContent=enabled?"已开启开机自启":"已关闭开机自启"; st.style.color="var(--green)"; }
+  else { st.textContent="操作失败: "+((r&&r.error)||"未知"); st.style.color="var(--red)"; this.checked=!enabled; }
+});
+document.getElementById("btnNotify").addEventListener("click",async()=>{
+  const st=document.getElementById("notifyState");
+  if(!("Notification" in window)){ st.textContent="当前浏览器不支持桌面通知"; st.style.color="var(--red)"; return; }
+  if(Notification.permission==="granted"){ st.textContent="桌面通知已启用"; st.style.color="var(--green)"; return; }
+  try{ const perm=await Notification.requestPermission(); st.textContent=(perm==="granted")?"桌面通知已启用":"未授权桌面通知"; st.style.color=(perm==="granted")?"var(--green)":"var(--red)"; }
+  catch(e){ st.textContent="请求通知权限失败"; }
 });
 document.getElementById("btnResetMeter").addEventListener("click",async()=>{
   if(!confirm("确定清除累计能耗与电费？此操作不可撤销。")) return;
@@ -1583,7 +1783,21 @@ function setStatus(type){
 }
 function clock(){ document.getElementById("clock").textContent=new Date().toLocaleTimeString("zh-CN",{hour12:false}); }
 setInterval(clock,1000); clock();
-tick(); setInterval(tick,1000);
+// 动态刷新频率: 由设置页 refresh_interval 控制
+let _ticker=null;
+function startTicker(){
+  if(_ticker) clearInterval(_ticker);
+  const iv=Math.max(500, (PREFS.refresh_interval||1)*1000);
+  _ticker=setInterval(tick, iv);
+}
+// 启动时先拉一次偏好 (主题/单位/刷新频率), 再启动主循环
+function loadPrefsOnce(){
+  return fetchJSON("/api/settings").then(d=>{
+    if(d&&!d.error&&d.prefs){ PREFS=Object.assign(PREFS,d.prefs); applyPrefs(); }
+    return d;
+  });
+}
+loadPrefsOnce().finally(()=>{ tick(); startTicker(); });
 window.addEventListener("resize",()=>{ drawActiveCharts(); });
 </script>
 </body>

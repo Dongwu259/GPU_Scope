@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 history.db
 meter.json
+prefs.json
 # 含本地 API 令牌, 切勿提交
 auth.json
 *.log

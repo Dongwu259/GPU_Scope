@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
@@ -373,6 +374,86 @@ class Meter:
                 "updated_at": self.data["updated_at"],
                 "daily": {k: round(v, 3) for k, v in self.data.get("daily", {}).items()},
             }
+
+
+# ---------------------------------------------------------------------------
+# Prefs — 用户偏好设置 (与计量 meter 分离, 落盘 prefs.json)
+# ---------------------------------------------------------------------------
+_PREFS_DEFAULT = {
+    "sampling_interval": 0.5,     # GPU 轮询间隔 (秒)
+    "hist_interval": 5.0,         # 历史采样间隔 (秒)
+    "hist_retention_days": 30,    # 历史保留天数
+    "currency": "¥",              # 货币符号
+    "temp_unit": "C",             # C | F
+    "power_unit": "W",            # W | kW
+    "theme": "auto",              # light | dark | auto
+    "refresh_interval": 1.0,      # 前端面板刷新频率 (秒)
+    "alert_temp": 0,              # GPU 温度告警阈值 (°C, 0=关闭)
+    "alert_util_low": 0,          # GPU 利用率低于该值告警 (%, 0=关闭)
+    "autostart": False,           # Windows 开机自启
+}
+
+
+class Prefs:
+    def __init__(self, path):
+        self.path = path
+        self.lock = threading.Lock()
+        self.data = dict(_PREFS_DEFAULT)
+        self._load()
+        self._last_save = 0
+
+    def _load(self):
+        try:
+            if os.path.exists(self.path):
+                with open(self.path, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                for k, v in _PREFS_DEFAULT.items():
+                    if k not in d:
+                        d[k] = v
+                self.data.update(d)
+        except Exception:
+            pass
+
+    def save(self, force=False):
+        now = time.time()
+        with self.lock:
+            if not force and (now - self._last_save) < 2:
+                return
+            tmp = self.path + ".tmp"
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(self.data, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, self.path)
+                self._last_save = now
+            except Exception:
+                pass
+
+    @staticmethod
+    def _coerce(key, val):
+        default = _PREFS_DEFAULT.get(key)
+        if isinstance(default, bool):
+            return bool(val)
+        if isinstance(default, int):
+            try:
+                return int(float(val))
+            except Exception:
+                return default
+        if isinstance(default, float):
+            try:
+                return float(val)
+            except Exception:
+                return default
+        return str(val)
+
+    def update(self, patch):
+        with self.lock:
+            for k, v in patch.items():
+                if k in _PREFS_DEFAULT:
+                    self.data[k] = self._coerce(k, v)
+        self.save(force=True)
+
+    def get(self, k, default=None):
+        return self.data.get(k, default)
 
 
 # ---------------------------------------------------------------------------
@@ -743,13 +824,20 @@ class Monitor:
             },
         }
 
-    def run(self, interval):
+    def run(self, prefs):
         # 启动 PDH 线程
         t = threading.Thread(target=self.mem_thread, daemon=True)
         t.start()
         while not self._stop:
             self.poll_once()
-            time.sleep(interval)
+            # 采样间隔可由设置页动态调整 (prefs.sampling_interval)
+            try:
+                iv = float(prefs.get("sampling_interval", 0.5))
+            except Exception:
+                iv = 0.5
+            if iv < 0.1:
+                iv = 0.1
+            time.sleep(iv)
 
 
 # ---------------------------------------------------------------------------
@@ -1411,6 +1499,7 @@ class Handler(BaseHTTPRequestHandler):
     sys = None
     meter = None
     history = None
+    prefs = None
     html_path = None
     auth_token = None
     server_version = "GPUMonitor/1.3"
@@ -1474,7 +1563,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps(self.sys.mem_snapshot() if self.sys else {"error": "sys monitor unavailable"}))
             return
         if path == "/api/settings":
-            self._send(200, json.dumps(self.meter.snapshot() if self.meter else {"error": "no meter"}))
+            snap = self.meter.snapshot() if self.meter else {"error": "no meter"}
+            if isinstance(snap, dict) and "error" not in snap and Handler.prefs is not None:
+                snap["prefs"] = Handler.prefs.data
+                snap["autostart_active"] = _autostart_active()
+            self._send(200, json.dumps(snap))
             return
         if path == "/api/history":
             from urllib.parse import parse_qs
@@ -1521,6 +1614,37 @@ class Handler(BaseHTTPRequestHandler):
             meter.reset_energy()
             self._send(200, json.dumps({"ok": True}))
             return
+        if path == "/api/settings/prefs":
+            try:
+                prefs = Handler.prefs
+                if prefs is None:
+                    self._send(500, json.dumps({"error": "prefs unavailable"}))
+                    return
+                patch = {k: v for k, v in (body or {}).items() if k in _PREFS_DEFAULT}
+                prefs.update(patch)
+                # 运行时生效: 历史采样间隔 / 保留天数 直接作用于 history 实例
+                hist = Handler.history
+                if hist is not None:
+                    try:
+                        hist.interval = float(prefs.get("hist_interval", hist.interval))
+                    except Exception:
+                        pass
+                    try:
+                        hist.retention_days = int(prefs.get("hist_retention_days", hist.retention_days))
+                    except Exception:
+                        pass
+                self._send(200, json.dumps({"ok": True, "prefs": prefs.data}))
+            except Exception as e:
+                self._send(400, json.dumps({"error": str(e)}))
+            return
+        if path == "/api/settings/autostart":
+            try:
+                enabled = bool((body or {}).get("enabled", False))
+                res = _set_autostart(enabled)
+                self._send(200, json.dumps(res))
+            except Exception as e:
+                self._send(400, json.dumps({"error": str(e)}))
+            return
         if path == "/api/shutdown":
             # 优雅退出: 先响应, 再落盘并退出 (供 stop 脚本调用)
             try:
@@ -1555,6 +1679,44 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         pass
+
+
+# ---------------------------------------------------------------------------
+# 开机自启 (Windows): 把 start_gpu_monitor.bat 复制到「启动」文件夹
+# ---------------------------------------------------------------------------
+def _autostart_path():
+    appdata = os.environ.get("APPDATA", "")
+    if not appdata:
+        return None
+    return os.path.join(appdata, "Microsoft", "Windows", "Start Menu",
+                        "Programs", "Startup", "GPU_Scope_start.bat")
+
+
+def _autostart_active():
+    p = _autostart_path()
+    return bool(p and os.path.exists(p))
+
+
+def _set_autostart(enabled):
+    if sys.platform != "win32":
+        return {"ok": False, "error": "仅支持 Windows 系统"}
+    dest = _autostart_path()
+    if dest is None:
+        return {"ok": False, "error": "找不到启动文件夹"}
+    base = os.path.dirname(os.path.abspath(__file__))
+    src = os.path.join(base, "start_gpu_monitor.bat")
+    try:
+        if enabled:
+            if not os.path.exists(src):
+                return {"ok": False, "error": "未找到 start_gpu_monitor.bat"}
+            shutil.copyfile(src, dest)
+            return {"ok": True, "enabled": True}
+        else:
+            if os.path.exists(dest):
+                os.remove(dest)
+            return {"ok": True, "enabled": False}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 def main():
@@ -1597,9 +1759,16 @@ def main():
     history_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history.db")
     history = History(history_path, interval=args.hist_interval, retention_days=args.hist_retention)
 
+    # 用户偏好设置 (落盘 prefs.json, 与计量 meter 分离)
+    prefs_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prefs.json")
+    prefs = Prefs(prefs_path)
+    # 用设置页里的值覆盖启动期 CLI 参数 (CLI 仅在无 prefs 时才有意义)
+    history.interval = float(prefs.get("hist_interval", args.hist_interval))
+    history.retention_days = int(prefs.get("hist_retention_days", args.hist_retention))
+
     print("> 正在初始化 NVML ...")
     monitor = Monitor(meter=meter)
-    poll_thread = threading.Thread(target=monitor.run, args=(args.interval,), daemon=True)
+    poll_thread = threading.Thread(target=monitor.run, args=(prefs,), daemon=True)
     poll_thread.start()
     monitor.poll_once()
     print(f"> 检测到 {monitor.count} 张 GPU:")
@@ -1625,6 +1794,7 @@ def main():
     Handler.sys = sys_monitor
     Handler.meter = meter
     Handler.history = history
+    Handler.prefs = prefs
     Handler.html_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html")
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     url = f"http://localhost:{args.port}"

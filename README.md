@@ -18,7 +18,7 @@
 - **持久化计量**：累计耗电量（度）与电费跨重启保存。
 - **累计 H100 等效算力时长**：将各卡「利用率 × 时长」按 FP16 Tensor 稠密峰值折算成 H100 等效 GPU 小时（`gpu_h100_hours`），跨重启持久化，概览「等效 AI 算力」卡片可查看。
 - **历史回放**：功率 / 利用率 / 温度 / 累计能耗 趋势曲线（SQLite 落盘，默认保留 30 天）。
-- **设置页**：调整电价、查看每日明细、清除累计。
+- **设置页**：采集与历史采样间隔、显示偏好（温度/功率单位、货币符号、界面主题、面板刷新频率）、告警阈值（温度/利用率 + 浏览器桌面通知）、Windows 开机自启、电价与数据管理。偏好落盘 `prefs.json`（自动生成，已 gitignore）。
 
 ### 关于温度与真实 CPU 功率
 
@@ -32,6 +32,7 @@ Windows 下 WMI 通常不暴露 CPU / 内存温度传感器，因此默认显示
 gpu_monitor.py  ── NVML 轮询线程 + 纯标准库 HTTP 服务 (无 Flask 依赖)
 index.html      ── 前端面板 (无外部依赖, 纯 Canvas 图表)
 meter.json      ── 持久化计量 (累计能耗/电费/电价, 自动生成, 已 gitignore)
+prefs.json       ── 用户偏好设置 (采集/显示/告警/自启, 自动生成, 已 gitignore)
 auth.json       ── 本地 API 令牌 (自动生成, 已 gitignore)
 history.db      ── 历史时序数据 (SQLite, 自动生成, 已 gitignore)
 watchdog.py     ── 看门狗守护进程 (端口探测 + 主服务崩溃自动重启, 自愈)
@@ -102,9 +103,12 @@ python gpu_monitor.py --port 8080 --interval 0.5
 | GET | `/api/metrics/<idx>` | 指定 GPU 快照 |
 | GET | `/api/cpu` | CPU 快照（含 LHM 状态） |
 | GET | `/api/memory` | 内存快照 |
-| GET | `/api/settings` | 持久化计量状态 |
+| GET | `/api/settings` | 持久化计量状态 + 用户偏好（prefs / autostart_active） |
 | GET | `/api/history?range=24h` | 历史数据（1h/6h/24h/7d/30d） |
+| POST | `/api/settings` | 持久化计量状态 + 用户偏好（prefs / autostart_active） |
 | POST | `/api/settings/price` | 设置电价（需令牌，远程） |
+| POST | `/api/settings/prefs` | 批量更新偏好（采样/单位/主题/刷新/告警，运行时生效，需令牌） |
+| POST | `/api/settings/autostart` | 开关 Windows 开机自启（需令牌） |
 | POST | `/api/settings/reset_meter` | 清除累计能耗与电费（需令牌） |
 | POST | `/api/settings/reset_all` | 清除全部历史（需令牌） |
 | POST | `/api/shutdown` | 优雅停止（需令牌，远程） |
