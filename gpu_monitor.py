@@ -462,17 +462,15 @@ class Prefs:
 # ---------------------------------------------------------------------------
 class Monitor:
     def __init__(self, meter):
-        self.nvml = _load_nvml()
-        self.count = self.nvml.nvmlDeviceGetCount()
-        self.handles = [self.nvml.nvmlDeviceGetHandleByIndex(i) for i in range(self.count)]
+        self._last_nvml_reinit = 0.0
         try:
-            self.driver = self.nvml.nvmlSystemGetDriverVersion()
+            self._init_nvml()
         except Exception:
+            # NVML 初始化失败(启动时无驱动/驱动未就绪): 降级运行, 后续由 poll_once 自愈重试
+            self.nvml = None
+            self.count = 0
+            self.handles = []
             self.driver = "unknown"
-        try:
-            cv = self.nvml.nvmlSystemGetCudaDriverVersion()
-            self.cuda = f"{cv // 1000}.{(cv % 1000) // 10}"
-        except Exception:
             self.cuda = "unknown"
         self.snapshots = [None] * self.count
         self.lock = threading.Lock()
@@ -499,6 +497,60 @@ class Monitor:
             self._gpu_last_energy_wh.append((e0 / 3.6e6) if e0 is not None else 0.0)
             self._gpu_last_ts.append(None)
 
+    # ---- NVML 初始化 / 自愈 ----
+    def _init_nvml(self):
+        """加载 NVML 并获取设备数与句柄。失败抛异常, 由调用方处理。"""
+        self.nvml = _load_nvml()
+        self.count = self.nvml.nvmlDeviceGetCount()
+        self.handles = [self.nvml.nvmlDeviceGetHandleByIndex(i) for i in range(self.count)]
+        try:
+            self.driver = self.nvml.nvmlSystemGetDriverVersion()
+        except Exception:
+            self.driver = "unknown"
+        try:
+            cv = self.nvml.nvmlSystemGetCudaDriverVersion()
+            self.cuda = f"{cv // 1000}.{(cv % 1000) // 10}"
+        except Exception:
+            self.cuda = "unknown"
+
+    def _reinit_nvml_if_needed(self):
+        """采样遇到 NVML 异常时, 限频(>=30s)重初始化 NVML。
+
+        典型场景: 驱动中途重启(睡眠唤醒/崩溃恢复/Windows 更新装驱动)后,
+        启动时创建的句柄已失效, 表现为 'access violation' / NVML 错误且永久无法识别。
+        重初始化可拿到新句柄自愈, 无需手动重启服务。
+        返回 True 表示已执行一次重初始化尝试(无论成败), 调用方应放弃本轮、下轮用新句柄全量重采。
+        """
+        now = time.time()
+        if now - self._last_nvml_reinit < 30:
+            return False
+        self._last_nvml_reinit = now
+        try:
+            self._init_nvml()
+        except Exception:
+            return True  # 此刻仍失败(驱动可能还在加载), 下轮再试
+        # 重建依赖 handles 的状态
+        try:
+            self._energy_start = []
+            self._gpu_last_energy_wh = []
+            self._gpu_last_ts = []
+            self._last_proc_ts = [0] * self.count
+            self._proc_util = [{} for _ in range(self.count)]
+            self.proc_mem_mb = [{} for _ in range(self.count)]
+            self.snapshots = [None] * self.count
+            for h in self.handles:
+                try:
+                    e0 = self.nvml.nvmlDeviceGetTotalEnergyConsumption(h)
+                except Exception:
+                    e0 = None
+                self._energy_start.append(e0)
+                self._gpu_last_energy_wh.append((e0 / 3.6e6) if e0 is not None else 0.0)
+                self._gpu_last_ts.append(None)
+            self._start_time = time.time()
+        except Exception:
+            pass
+        return True
+
     # ---- PDH 后台线程 ----
     def mem_thread(self):
         while not self._stop:
@@ -516,11 +568,18 @@ class Monitor:
             return self.snapshots[idx] if 0 <= idx < self.count else None
 
     def poll_once(self):
+        if not self.handles:
+            # 启动时不支持/无 GPU: 限频尝试重初始化(驱动就绪后自愈)
+            if self._reinit_nvml_if_needed():
+                return
         for i, h in enumerate(self.handles):
             try:
                 snap = self._read_device(h, i)
             except Exception as e:
                 snap = {"index": i, "error": str(e)}
+                # 句柄可能已失效(驱动中途重启/睡眠唤醒), 限频重初始化自愈
+                if self._reinit_nvml_if_needed():
+                    return  # 用新句柄下轮全量重采
             with self.lock:
                 self.snapshots[i] = snap
 
