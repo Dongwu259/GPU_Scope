@@ -229,7 +229,7 @@
             <span class="chip">GPU <b id="ovGpuPwr">--</b> W</span>
             <span class="chip">CPU <b id="ovCpuPwr">--</b> W</span>
           </div>
-          <div class="note">整机功率 = GPU 实时功率 + CPU 功率（若已安装 LibreHardwareMonitor 则为真实封装功率，否则为 TDP 估算）。不含主板 / 风扇 / 外设等基础功耗，属近似上界。</div>
+          <div class="note">整机功率 = GPU 实时功率 + CPU 功率（若已安装 LibreHardwareMonitor 则为真实封装功率，否则为 TDP 估算）。不含主板 / 风扇 / 外设等基础功耗，属近似上界。带 * 的数值为估算值。</div>
         </div>
         <div class="card">
           <h3>累计耗电与电费 <span class="tag">持久化累计</span></h3>
@@ -519,6 +519,7 @@
         <div class="sub" id="cpuName2">正在采集 …</div>
       </div>
       <div class="note" id="cpuLhmNote" style="margin-bottom:14px"></div>
+      <div class="note" id="cpuEstNote" style="margin-bottom:14px">带 * 的数值为估算值（AVX 算力按 FLOP 模型估算，CPU 功率按 TDP 曲线估算）。</div>
 
       <!-- 选卡网格: 进入先看卡片, 点击进入对应 CPU 详情 (单 CPU 只显示一张) -->
       <div id="cpuCards" class="grid cards4" style="margin-bottom:14px"></div>
@@ -1009,7 +1010,7 @@ var ZH2EN = {
   "CPU 监控不可用 (psutil 未安装)":"CPU monitoring unavailable (psutil not installed)",
   "当前无占用 GPU 的进程":"No processes currently using the GPU",
   // 长说明 (notes)
-  "整机功率 = GPU 实时功率 + CPU 功率（若已安装 LibreHardwareMonitor 则为真实封装功率，否则为 TDP 估算）。不含主板 / 风扇 / 外设等基础功耗，属近似上界。":"System power = real-time GPU power + CPU power (actual package power if LibreHardwareMonitor is installed, otherwise TDP estimate). Excludes base power of motherboard / fans / peripherals; it is an approximate upper bound.",
+  "整机功率 = GPU 实时功率 + CPU 功率（若已安装 LibreHardwareMonitor 则为真实封装功率，否则为 TDP 估算）。不含主板 / 风扇 / 外设等基础功耗，属近似上界。带 * 的数值为估算值。":"System power = real-time GPU power + CPU power (actual package power if LibreHardwareMonitor is installed, otherwise TDP estimate). Excludes base power of motherboard / fans / peripherals; it is an approximate upper bound. Values marked * are estimates.",
   "GPU / CPU 能耗为跨重启持久化累计（保存于 meter.json），即使本面板重启也不会归零；GPU 部分由 NVML 实测能量差累加，CPU 部分由估算功率积分。电费 = 累计度数 × 电价（默认 ¥0.60/度，可在「设置」页调整并持久化）。":"GPU / CPU energy is persisted across restarts (saved in meter.json) and won't reset even if this panel restarts; the GPU part accumulates from NVML measured energy deltas and the CPU part integrates estimated power. Cost = cumulative kWh × price (default ¥0.60/kWh, adjustable & persisted in Settings).",
   "所有网卡合计收发字节速率（psutil.net_io_counters 差分，不含协议开销）；下方为各网卡明细。":"Total RX/TX byte rate across all NICs (psutil.net_io_counters delta, excluding protocol overhead); per-NIC details below.",
   "头条 = Tensor Core FP16/BF16 ":"Headline = Tensor Core FP16/BF16 ",
@@ -1071,7 +1072,8 @@ Object.assign(ZH2EN,{
   "峰值 × GPU 利用率。视频生成(扩散模型)以张量核心矩阵乘为主，故以此作为等效 AI 算力。下方为各精度档位的理论峰值与当前有效值（峰值 × 利用率）。注意：NVIDIA 营销的 \"1801 AI TOPS\" 实为":" peak × GPU utilization. Video generation (diffusion) is dominated by tensor-core matmul, so this is used as equivalent AI compute. Below are theoretical peaks and current effective values per precision (peak × utilization). Note: NVIDIA's marketed \"1801 AI TOPS\" is actually ",
   "头条 = AVX-512 FMA 理论峰值 × CPU 利用率。CPU 算力以":"Headline = AVX-512 FMA theoretical peak × CPU utilization. CPU compute is measured in ",
   "计（1 TFLOPS = 1000 GFLOPS），远低于 GPU 张量核心。峰值按「每核每周期 32 FLOP (512-bit) × 核心数 × 最高频率」估算。实际受指令集、内存带宽、散热限制，此为上界估算。":" GFLOPS (1 TFLOPS = 1000 GFLOPS), far below GPU tensor cores. Peak is estimated as \"32 FLOP per core per cycle (512-bit) × core count × max frequency\". Actual performance is limited by instruction set, memory bandwidth, and thermals; this is an upper-bound estimate.",
-  "说明：CPU 与内存温度在本机 WMI 中未暴露传感器（需安装 LibreHardwareMonitor / OpenHardwareMonitor 等第三方工具才能读取），故显示":"Note: CPU and memory temperatures are not exposed by this machine's WMI (a third-party tool such as LibreHardwareMonitor / OpenHardwareMonitor is required to read them), so "
+  "说明：CPU 与内存温度在本机 WMI 中未暴露传感器（需安装 LibreHardwareMonitor / OpenHardwareMonitor 等第三方工具才能读取），故显示":"Note: CPU and memory temperatures are not exposed by this machine's WMI (a third-party tool such as LibreHardwareMonitor / OpenHardwareMonitor is required to read them), so ",
+  "带 * 的数值为估算值（AVX 算力按 FLOP 模型估算，CPU 功率按 TDP 曲线估算）。":"Values marked * are estimates (AVX compute via FLOP model, CPU power via TDP curve)."
 });
 // 服务端返回的中文标签/原因映射 (前端补全翻译)
 var LADDER_EN = {
@@ -1539,11 +1541,11 @@ function renderCpu(d){
   const cpt=document.getElementById("cpuPageTitle");
   if(cpt) cpt.textContent = cpuN>1?t(`CPU 监测面板 · 共 ${cpuN} 路`,`CPU Monitor · ${cpuN} sockets`,{n:cpuN}):t("CPU 监测面板","CPU Monitor");
   document.getElementById("cpuName2").textContent=t(
-    (cpuN>1?`CPU {{i}} · `:"")+`{{name}} · {{cores}}核/{{threads}}线程`+(cpuN>1?` · TDP {{tdp}} W`:` · 最高 {{max}} MHz`),
-    (cpuN>1?`CPU {{i}} · `:"")+`{{name}} · {{cores}}C/{{threads}}T`+(cpuN>1?` · TDP {{tdp}} W`:` · max {{max}} MHz`),
+    (cpuN>1?`CPU {{i}} · `:"")+`{{name}} · {{cores}}核/{{threads}}线程`+(cpuN>1?` · TDP {{tdp}} W*`:` · 最高 {{max}} MHz`),
+    (cpuN>1?`CPU {{i}} · `:"")+`{{name}} · {{cores}}C/{{threads}}T`+(cpuN>1?` · TDP {{tdp}} W*`:` · max {{max}} MHz`),
     {i:selectedCpuIdx, name:csName, cores:csCores, threads:csThreads, tdp:csTdp, max:d.max_mhz});
   const c=d.compute;
-  document.getElementById("cpuGflops").textContent=fmt(c.avx512_effective_gflops,0);
+  document.getElementById("cpuGflops").textContent=fmt(c.avx512_effective_gflops,0)+"*";
   const maxPeak=Math.max(c.avx2_peak_gflops,c.avx512_peak_gflops,1);
   const rows=[
     {n:t("AVX-512 峰值","AVX-512 Peak"),peak:c.avx512_peak_gflops,eff:c.avx512_peak_gflops,hl:true},
@@ -1555,12 +1557,12 @@ function renderCpu(d){
     const p=Math.min(100,x.peak/maxPeak*100);
     return `<div class="row${x.hl?' hl':''}"><span class="name" title="峰值 ${fmt(x.peak,1)} GFLOPS">${x.n}</span>`+
            `<span class="barwrap"><i style="width:${p}%"></i></span>`+
-           `<span class="val">有效 ${fmt(x.eff,1)} / 峰值 ${fmt(x.peak,1)} GFLOPS</span></div>`;
+           `<span class="val">有效 ${fmt(x.eff,1)} / 峰值 ${fmt(x.peak,1)} GFLOPS*</span></div>`;
   }).join("");
 
   const u=csUtil, pw=csPw, tmp=d.temperature_c, volt=d.voltage_v;
   document.getElementById("cpuUtilV").textContent=u+"%"; setBar("cpuUtilB",u);
-  document.getElementById("cpuPwrV").textContent=pw!=null?fmtPower(pw):"--"; setBar("cpuPwrB",(pw&&csTdp)?Math.min(100,pw/(csTdp*1.3)*100):0);
+  document.getElementById("cpuPwrV").textContent=pw!=null?fmtPower(pw)+"*":"--"; setBar("cpuPwrB",(pw&&csTdp)?Math.min(100,pw/(csTdp*1.3)*100):0);
   const lhmAvail = !!(d.lhm && d.lhm.available);
   if(tmp==null){ document.getElementById("cpuTmpV").textContent="N/A"; setBar("cpuTmpB",0);
     const ts=document.getElementById("cpuTmpStatus"); ts.textContent=t("N/A (无传感器)","N/A (no sensor)"); ts.className="v warn"; }
@@ -1579,8 +1581,8 @@ function renderCpu(d){
     if(pn2){ pn2.textContent=psrc; pn2.className="v "+cls; } }
   document.getElementById("cpuArch").textContent=(d.name||"").includes("Intel")?t("Intel x86-64","Intel x86-64"):((d.name||"").includes("AMD")?t("AMD x86-64","AMD x86-64"):t("x86-64","x86-64"));
   document.getElementById("cpuCT").textContent=`${csCores}/${csThreads}`;
-  document.getElementById("cpuTdp").textContent=csTdp;
-  document.getElementById("cpuAvx2Eff").textContent=fmt(c.avx2_effective_gflops,0)+" GFLOPS";
+  document.getElementById("cpuTdp").textContent=csTdp+"*";
+  document.getElementById("cpuAvx2Eff").textContent=fmt(c.avx2_effective_gflops,0)+" GFLOPS*";
 
   document.getElementById("cpuEnergy").textContent=(d.energy_kwh!=null)?t("{{v}} 度 ({{w}} Wh)","{{v}} kWh ({{w}} Wh)",{v:d.energy_kwh, w:d.energy_wh}):"--";
   document.getElementById("cpuCost").textContent=(d.electricity_cost_yuan!=null)?t("{{c}} @{{r}}/度","{{c}} @{{r}}/kWh",{c:CUR()+d.electricity_cost_yuan, r:CUR()+d.elec_rate_yuan_per_kwh}):"--";
@@ -1619,7 +1621,7 @@ function buildCpuCards(){
     return `<div class="gpu-card${active}" data-idx="${i}">
       <div class="gpu-card-top">
         <span class="gpu-idx">CPU ${i}</span>
-        <span class="gpu-ef">${pw!=null? fmtPower(pw) : "--"}</span>
+        <span class="gpu-ef">${pw!=null? fmtPower(pw)+"*" : "--"}</span>
       </div>
       <div class="gpu-model">${nm}</div>
       <div class="gpu-metrics">
@@ -1695,9 +1697,9 @@ function renderOverview(){
   const rate = (gpus[0]&&gpus[0].system)? gpus[0].system.elec_rate_yuan_per_kwh : (c? c.elec_rate_yuan_per_kwh : 0.60);
   const cost = totalEnergy/1000*rate;
 
-  document.getElementById("ovPwr").textContent=fmt(totalPwr,0);
+  document.getElementById("ovPwr").textContent=fmt(totalPwr,0)+"*";
   document.getElementById("ovGpuPwr").textContent=fmt(gpuPwr,0);
-  document.getElementById("ovCpuPwr").textContent=fmt(cpuPwr,0);
+  document.getElementById("ovCpuPwr").textContent=fmt(cpuPwr,0)+"*";
   document.getElementById("ovEnergy").textContent=fmt(totalEnergy/1000,4);
   document.getElementById("ovGpuEnergy").textContent=fmt(gpuEnergy/1000,4);
   document.getElementById("ovCpuEnergy").textContent=fmt(cpuEnergy/1000,4);
@@ -1719,7 +1721,7 @@ function renderOverview(){
     document.getElementById("ovMemUsed").textContent=m.used_gib;
     document.getElementById("ovMemTot").textContent=m.total_gib;
   }
-  document.getElementById("ovPwr2").textContent=fmtPower(totalPwr);
+  document.getElementById("ovPwr2").textContent=fmtPower(totalPwr)+"*";
   document.getElementById("ovCost2").textContent=CUR()+fmt(cost,3);
   const pmax = (g&&g.power.limit_watts?g.power.limit_watts:400) + (c&&c.tdp_w?c.tdp_w*1.3:200);
   setBar("ovPwrB", totalPwr/pmax*100);
