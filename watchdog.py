@@ -48,21 +48,32 @@ def alive(pid):
     if not pid:
         return False
     try:
-        h = _kernel().OpenProcess(0x0400, False, pid)  # PROCESS_QUERY_INFORMATION
-        if h:
-            _kernel().CloseHandle(h)
-            return True
+        if os.name == "nt":
+            h = _kernel().OpenProcess(0x0400, False, pid)  # PROCESS_QUERY_INFORMATION
+            if h:
+                _kernel().CloseHandle(h)
+                return True
+            return False
+        os.kill(pid, 0)  # POSIX: signal 0 only probes existence
+        return True
+    except ProcessLookupError:
         return False
+    except PermissionError:
+        return True  # exists but owned by another user
     except Exception:
         return False
 
 
 def terminate(pid):
     try:
-        h = _kernel().OpenProcess(1, False, pid)  # PROCESS_TERMINATE
-        if h:
-            _kernel().TerminateProcess(h, 0)
-            _kernel().CloseHandle(h)
+        if os.name == "nt":
+            h = _kernel().OpenProcess(1, False, pid)  # PROCESS_TERMINATE
+            if h:
+                _kernel().TerminateProcess(h, 0)
+                _kernel().CloseHandle(h)
+                return True
+        else:
+            os.kill(pid, 15)  # SIGTERM
             return True
     except Exception:
         pass

@@ -2,6 +2,9 @@
 *.bat text eol=crlf
 *.cmd text eol=crlf
 
+# Shell scripts use LF (required on Linux/macOS)
+*.sh text eol=lf
+
 # Source files use LF
 *.py text eol=lf
 *.html text eol=lf

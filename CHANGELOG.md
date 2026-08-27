@@ -2,6 +2,21 @@
 
 本项目遵循「功能累加」式记录（暂未采用严格 SemVer）。
 
+## 0.1.5 — 跨平台骨架 + Linux 后端（Windows 全功能不变）
+
+- **平台守卫**：新增 `IS_WINDOWS / IS_LINUX / IS_MAC` 常量，63 处 Windows 专属依赖（WMI / PDH / LHM / 启动文件夹 / windll）全部分支化；非 Windows 平台自动降级，不再报错。
+- **watchdog.py 跨平台**：`ctypes.windll` 进程探测/终止改为 `os.kill(SIGTERM/0)`（POSIX 分支），Windows 行为不变。
+- **Linux 后端**：
+  - GPU：NVML 复用（`libnvidia-ml.so.1`），多卡/每进程显存/能耗全部可用。
+  - CPU 多路：新增 `_linux_cpu_info()` 解析 `/proc/cpuinfo` 按 physical id 分组（含 EOF 收尾修复），逐路核心/线程/频率/TDP。
+  - 温度/功率：新增 `LinuxThermal` 后端（hwmon 温度 + RAPL energy_uj 差分功率，接口与 LHMClient 兼容）；RAPL 无权限时自动降级 TDP 估算。
+  - 内存/网络/磁盘：psutil（macOS 亦适用）。
+  - 开机自启：设置页开启后写 `~/.config/systemd/user/gpu-monitor.service` 并尝试 enable。
+- **Linux 部署脚本**：新增 `start/stop/status_gpu_monitor.sh`（nohup 后台 + watchdog，纯 ASCII）。
+- **健壮性**：`_guess_tdp` 在 psutil 缺失时不再崩溃（`psutil.cpu_count` 判空）。
+- **macOS**：基础指标（psutil）可用，Apple Silicon GPU/功耗/温度后端待后续版本（界面降级提示）。
+- 验证：Linux 分支单元测试（模拟 `/proc/cpuinfo` 双路解析、平台守卫、systemd 自启）全部通过；Windows 测试套件回归全绿。Linux 实机验证待用户服务器部署。
+
 ## 0.1.4 — 估算值标记与验证边界声明
 
 - **估算值标记**：CPU 功率、AVX/AVX-512 算力、TDP、整机功率（含 CPU 估算）等数值统一加 `*` 标记，CPU 页与概览页新增图例说明（中英双语），明确「带 * 为估算值」。

@@ -32,6 +32,11 @@ import sys
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 import threading
 
+# ---- 平台识别: 各平台专属采集后端按此分发 ----
+IS_WINDOWS = sys.platform == "win32"
+IS_LINUX = sys.platform.startswith("linux")
+IS_MAC = sys.platform == "darwin"
+
 # 统一的诊断日志: 记录进程生命周期关键事件 (SIGTERM / 异常崩溃 / 自愈重启),
 # 用于排查"服务莫名关闭"类问题 —— server_err.log 平时为空即说明非 Python 崩溃。
 def _errlog(msg):
@@ -69,24 +74,27 @@ def _load_nvml():
         return pynvml
     except Exception:
         pass
-    candidates = [r"C:\Windows\System32\nvml.dll", r"C:\Windows\SysWOW64\nvml.dll"]
-    try:
-        import glob
-        candidates += glob.glob(r"C:\NVIDIA\*\nvml.dll")
-    except Exception:
-        pass
-    for path in candidates:
-        if os.path.exists(path):
-            try:
-                os.add_dll_directory(os.path.dirname(path))
-            except Exception:
-                pass
-            try:
-                import pynvml
-                pynvml.nvmlInit()
-                return pynvml
-            except Exception:
-                continue
+    if IS_WINDOWS:
+        candidates = [r"C:\Windows\System32\nvml.dll", r"C:\Windows\SysWOW64\nvml.dll"]
+        try:
+            import glob
+            candidates += glob.glob(r"C:\NVIDIA\*\nvml.dll")
+        except Exception:
+            pass
+        for path in candidates:
+            if os.path.exists(path):
+                try:
+                    os.add_dll_directory(os.path.dirname(path))
+                except Exception:
+                    pass
+                try:
+                    import pynvml
+                    pynvml.nvmlInit()
+                    return pynvml
+                except Exception:
+                    continue
+    # 非 Windows (或 Windows 未找到 nvml.dll): 交给 pynvml 默认查找
+    # (Linux 会加载 libnvidia-ml.so.1; macOS Intel 卡同样走 NVML)
     import pynvml
     pynvml.nvmlInit()
     return pynvml
@@ -189,20 +197,27 @@ def decode_throttle(reason_bits):
 
 
 def _proc_name(pid):
-    """尽力获取进程名 (无 psutil 时使用 ctypes 调用 Windows API)。"""
-    try:
-        import ctypes
-        kernel32 = ctypes.windll.kernel32
-        psapi = ctypes.windll.psapi
-        h = kernel32.OpenProcess(0x0400, False, pid)
-        if not h:
+    """尽力获取进程名 (跨平台: psutil 优先; Windows 兜底 ctypes API)。"""
+    if psutil:
+        try:
+            return psutil.Process(pid).name()
+        except Exception:
+            pass
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            psapi = ctypes.windll.psapi
+            h = kernel32.OpenProcess(0x0400, False, pid)
+            if not h:
+                return None
+            buf = ctypes.create_unicode_buffer(1024)
+            if psapi.GetModuleFileNameExW(h, 0, buf, 1024):
+                return buf.value.split("\\")[-1]
             return None
-        buf = ctypes.create_unicode_buffer(1024)
-        if psapi.GetModuleFileNameExW(h, 0, buf, 1024):
-            return buf.value.split("\\")[-1]
-        return None
-    except Exception:
-        return None
+        except Exception:
+            return None
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +235,9 @@ _PDH_SCRIPT = (
 
 def _query_pdh_proc_mem():
     out = {}
+    if not IS_WINDOWS:
+        # 非 Windows 无 PDH 性能计数器; 每进程显存由 NVML 进程 API 提供
+        return out
     try:
         r = subprocess.run(
             ["powershell", "-NoProfile", "-Command", _PDH_SCRIPT],
@@ -1021,11 +1039,112 @@ class LHMClient:
             }
 
 
-def _make_lhm():
-    try:
-        return LHMClient()
-    except Exception:
+class LinuxThermal:
+    """Linux 温度/功率后端 (接口与 LHMClient 一致: update / snapshot)。
+
+    - 温度: hwmon (coretemp / k10temp / zenpower / cpu_thermal), 通常无需 root。
+    - 封装功率: RAPL energy_uj 差分 (intel-rapl:0 / amd_rapl:0); 多数发行版该文件
+      仅 root 可读, 无权限时 cpu_power_w 返回 None, 上层自动走 TDP 估算降级。
+    """
+
+    def __init__(self, poll_interval=4.0):
+        self.poll_interval = poll_interval
+        self._lock = threading.Lock()
+        self.available = False
+        self.method = None
+        self.cpu_temp_c = None
+        self.cpu_power_w = None
+        self.mem_temp_c = None
+        self._last = 0.0
+        self._rapl_prev = None
+        self._rapl_prev_t = None
+
+    @staticmethod
+    def _read_cpu_temp():
+        try:
+            base = "/sys/class/hwmon"
+            for h in sorted(os.listdir(base)):
+                p = os.path.join(base, h)
+                name = ""
+                try:
+                    with open(os.path.join(p, "name")) as f:
+                        name = f.read().strip()
+                except Exception:
+                    pass
+                if name not in ("coretemp", "k10temp", "zenpower", "cpu_thermal"):
+                    continue
+                for f in ("temp1_input", "temp0_input", "temp_input"):
+                    fp = os.path.join(p, f)
+                    if os.path.exists(fp):
+                        try:
+                            with open(fp) as fh:
+                                return round(int(fh.read().strip()) / 1000.0, 1)
+                        except Exception:
+                            continue
+        except Exception:
+            pass
         return None
+
+    @staticmethod
+    def _read_rapl_energy():
+        for cand in ("intel-rapl:0", "intel-rapl:0:0", "amd_rapl:0"):
+            fp = os.path.join("/sys/class/powercap", cand, "energy_uj")
+            if not os.path.exists(fp):
+                continue
+            try:
+                with open(fp) as f:
+                    return int(f.read().strip())
+            except Exception:
+                return None
+        return None
+
+    def update(self):
+        now = time.time()
+        with self._lock:
+            due = (not self.available) or (now - self._last > self.poll_interval)
+        if not due:
+            return
+        temp = self._read_cpu_temp()
+        energy = self._read_rapl_energy()
+        pw = None
+        if energy is not None and self._rapl_prev is not None and self._rapl_prev_t:
+            dt = now - self._rapl_prev_t
+            if dt > 0:
+                w = round((energy - self._rapl_prev) / dt / 1e6, 1)  # uJ/s -> W
+                if 0 < w < 5000:  # 合理范围过滤 (计数器回绕/异常)
+                    pw = w
+        self._rapl_prev = energy
+        self._rapl_prev_t = now
+        with self._lock:
+            if temp is not None or energy is not None:
+                self.available = True
+                self.method = "hwmon/rapl"
+            self.cpu_temp_c = temp
+            self.cpu_power_w = pw
+            self._last = now
+
+    def snapshot(self):
+        with self._lock:
+            return {
+                "available": self.available, "method": self.method,
+                "cpu_temp_c": self.cpu_temp_c, "cpu_power_w": self.cpu_power_w,
+                "mem_temp_c": self.mem_temp_c,
+            }
+
+
+def _make_lhm():
+    if IS_WINDOWS:
+        try:
+            return LHMClient()
+        except Exception:
+            return None
+    if IS_LINUX:
+        # 温度/功率走 hwmon + RAPL (接口兼容 LHMClient)
+        try:
+            return LinuxThermal()
+        except Exception:
+            return None
+    return None  # macOS / 其他: 暂无温度/功率后端, 走 TDP 估算降级
 
 
 # ---------------------------------------------------------------------------
@@ -1047,6 +1166,8 @@ SYS_STATIC = {
 
 
 def _wmi_json(script):
+    if not IS_WINDOWS:
+        return None  # WMI 为 Windows 专属; 其他平台走 psutil / sysfs 后端
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-Command", script],
                            capture_output=True, timeout=15,
@@ -1057,8 +1178,11 @@ def _wmi_json(script):
 
 
 def _guess_tdp(name):
+    def _core_guess():
+        n = (psutil.cpu_count(logical=False) if psutil else None) or 8
+        return float(max(65, n * 8))
     if not name:
-        return float(max(65, (psutil.cpu_count(logical=False) or 8) * 8))
+        return _core_guess()
     n = (name or "").upper()
     table = {
         "9950X": 170, "9900X": 120, "9700X": 65, "9600X": 65,
@@ -1071,7 +1195,71 @@ def _guess_tdp(name):
     for k, v in table.items():
         if k in n:
             return float(v)
-    return float(max(65, (psutil.cpu_count(logical=False) or 8) * 8))
+    return _core_guess()
+
+
+def _linux_cpu_info():
+    """Linux 多路 CPU: 解析 /proc/cpuinfo, 按 physical id 分组 (对称多路常见)。
+
+    每路汇总: 型号 / 物理核心数 (core id 去重) / 线程数 / 最高频率 (MHz)。
+    /proc/cpuinfo 的 cpu MHz 是当前频率, 尽量用 cpufreq cpuinfo_max_freq 提升。
+    """
+    cpus = []
+    phys, order = {}, []
+
+    def _flush(cur):
+        if "processor" not in cur:
+            return
+        pid = cur.get("physical id", "0")
+        if pid not in phys:
+            phys[pid] = {"name": cur.get("model name", "CPU"),
+                         "core_ids": set(), "threads": 0, "max_mhz": 0}
+            order.append(pid)
+        phys[pid]["core_ids"].add((cur.get("physical id", "0"),
+                                   cur.get("core id", "")))
+        try:
+            phys[pid]["max_mhz"] = max(phys[pid]["max_mhz"],
+                                       int(float(cur.get("cpu MHz", 0) or 0)))
+        except Exception:
+            pass
+        phys[pid]["threads"] += 1
+
+    try:
+        cur = {}
+        with open("/proc/cpuinfo", "r", encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line:
+                    _flush(cur)
+                    cur = {}
+                    continue
+                k, _, v = line.partition(":")
+                cur[k.strip()] = v.strip()
+        _flush(cur)  # 末尾无空行时收尾最后一块
+    except Exception:
+        return cpus
+    for pid in order:
+        p = phys[pid]
+        name = p["name"].strip()
+        # 尝试 cpufreq 标称最高频率 (kHz -> MHz); 失败则回退到当前频率估算
+        mhz = None
+        for cpu0 in range(p["threads"]):
+            fp = "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq" % cpu0
+            try:
+                with open(fp) as f:
+                    mhz = int(f.read().strip()) // 1000
+                break
+            except Exception:
+                continue
+        cpus.append({
+            "name": name,
+            "cores": len(p["core_ids"]) or p["threads"],
+            "threads": p["threads"],
+            "max_mhz": mhz or (p["max_mhz"] or 3000),
+            "voltage_v": None,
+            "tdp_w": _guess_tdp(name),
+        })
+    return cpus
 
 
 def _init_sys_static():
@@ -1079,30 +1267,34 @@ def _init_sys_static():
     if psutil:
         s["cpu_cores"] = psutil.cpu_count(logical=False)
         s["cpu_threads"] = psutil.cpu_count(logical=True)
-    # 多路 CPU: Win32_Processor 每路返回一条记录, 逐路解析型号/核心/线程/频率
     cpus = []
-    out = _wmi_json("Get-CimInstance Win32_Processor | Select Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed,CurrentVoltage | ConvertTo-Json")
-    try:
-        if out:
-            d = json.loads(out)
-            if isinstance(d, dict):
-                d = [d]
-            for item in d:
-                name = (item.get("Name") or "").strip()
-                cores = int(item.get("NumberOfCores") or 0) or None
-                threads = int(item.get("NumberOfLogicalProcessors") or 0) or None
-                max_mhz = int(item.get("MaxClockSpeed") or 0) or None
-                cv = item.get("CurrentVoltage")
-                volt = round(cv * 0.1, 3) if cv else None
-                cpus.append({
-                    "name": name, "cores": cores, "threads": threads,
-                    "max_mhz": max_mhz, "voltage_v": volt,
-                    "tdp_w": _guess_tdp(name),
-                })
-    except Exception:
-        pass
+    if IS_WINDOWS:
+        # 多路 CPU: Win32_Processor 每路返回一条记录, 逐路解析型号/核心/线程/频率
+        out = _wmi_json("Get-CimInstance Win32_Processor | Select Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed,CurrentVoltage | ConvertTo-Json")
+        try:
+            if out:
+                d = json.loads(out)
+                if isinstance(d, dict):
+                    d = [d]
+                for item in d:
+                    name = (item.get("Name") or "").strip()
+                    cores = int(item.get("NumberOfCores") or 0) or None
+                    threads = int(item.get("NumberOfLogicalProcessors") or 0) or None
+                    max_mhz = int(item.get("MaxClockSpeed") or 0) or None
+                    cv = item.get("CurrentVoltage")
+                    volt = round(cv * 0.1, 3) if cv else None
+                    cpus.append({
+                        "name": name, "cores": cores, "threads": threads,
+                        "max_mhz": max_mhz, "voltage_v": volt,
+                        "tdp_w": _guess_tdp(name),
+                    })
+        except Exception:
+            pass
+    elif IS_LINUX:
+        cpus = _linux_cpu_info()
+    # macOS / 其他: 走下方 psutil 单路兜底
     if not cpus:
-        # 兜底: 无 WMI 时按 psutil 总核心数估一个单路
+        # 兜底: 无 WMI / 无 /proc/cpuinfo 时按 psutil 总核心数估一个单路
         n = psutil.cpu_count(logical=False) or 8
         cpus.append({
             "name": "CPU", "cores": n, "threads": psutil.cpu_count(logical=True),
@@ -1117,21 +1309,26 @@ def _init_sys_static():
     s["cpu_voltage_v"] = cpus[0]["voltage_v"]
     # 总 TDP = 各路 TDP 之和 (服务器多路叠加)
     s["cpu_tdp_w"] = sum(c["tdp_w"] or 0 for c in cpus) or 125.0
-    out = _wmi_json("Get-CimInstance Win32_PhysicalMemory | Measure-Object -Property Capacity -Sum | Select -ExpandProperty Sum")
-    try:
-        if out and str(out).strip().isdigit():
-            s["ram_total_gib"] = round(int(str(out).strip()) / (1024 ** 3), 1)
-    except Exception:
-        pass
-    out = _wmi_json("Get-CimInstance Win32_PhysicalMemory | Select -First 1 Speed | ConvertTo-Json")
-    try:
-        if out:
-            d = json.loads(out)
-            sp = d.get("Speed") if isinstance(d, dict) else None
-            if sp:
-                s["ram_speed_mhz"] = int(sp)
-    except Exception:
-        pass
+    # 内存容量: Windows 走 WMI; 其他平台直接 psutil (macOS 统一内存也等于系统 RAM)
+    if IS_WINDOWS:
+        out = _wmi_json("Get-CimInstance Win32_PhysicalMemory | Measure-Object -Property Capacity -Sum | Select -ExpandProperty Sum")
+        try:
+            if out and str(out).strip().isdigit():
+                s["ram_total_gib"] = round(int(str(out).strip()) / (1024 ** 3), 1)
+        except Exception:
+            pass
+    elif psutil:
+        s["ram_total_gib"] = round(psutil.virtual_memory().total / (1024 ** 3), 1)
+    if IS_WINDOWS:
+        out = _wmi_json("Get-CimInstance Win32_PhysicalMemory | Select -First 1 Speed | ConvertTo-Json")
+        try:
+            if out:
+                d = json.loads(out)
+                sp = d.get("Speed") if isinstance(d, dict) else None
+                if sp:
+                    s["ram_speed_mhz"] = int(sp)
+        except Exception:
+            pass
 
 
 def _cpu_peaks():
@@ -1258,17 +1455,18 @@ class SysMonitor:
                         if io:
                             self._last_disk = (io.read_bytes, io.write_bytes)
                             self._last_disk_t = now
-                # 提交内存占比 (负载) via 性能计数器
-                try:
-                    r = subprocess.run(["powershell", "-NoProfile", "-Command", perf_commit],
-                                       capture_output=True, text=True, timeout=10,
-                                       creationflags=CREATE_NO_WINDOW)
-                    vals = [float(x) for x in r.stdout.split() if x.strip()]
-                    if vals:
-                        with self.lock:
-                            self.mem["load_percent"] = round(vals[0], 1)
-                except Exception:
-                    pass
+                # 提交内存占比 (负载) via 性能计数器 (仅 Windows; 其他平台用 psutil percent)
+                if IS_WINDOWS:
+                    try:
+                        r = subprocess.run(["powershell", "-NoProfile", "-Command", perf_commit],
+                                           capture_output=True, text=True, timeout=10,
+                                           creationflags=CREATE_NO_WINDOW)
+                        vals = [float(x) for x in r.stdout.split() if x.strip()]
+                        if vals:
+                            with self.lock:
+                                self.mem["load_percent"] = round(vals[0], 1)
+                    except Exception:
+                        pass
             except Exception:
                 pass
             time.sleep(2)
@@ -1447,8 +1645,8 @@ class SysMonitor:
                 "total_avx512_effective_gflops": round(avx512 * util / 100.0, 1),
             },
             "lhm": lhm,
-            "temperature_source": "LibreHardwareMonitor" if cpu_temp is not None else None,
-            "power_source": "LibreHardwareMonitor" if not power_est else "TDP 估算",
+            "temperature_source": (lhm.get("method") or "LibreHardwareMonitor") if cpu_temp is not None else None,
+            "power_source": (lhm.get("method") or "LibreHardwareMonitor") if not power_est else "TDP 估算",
             "timestamp": time.time(),
         }
 
@@ -1461,7 +1659,7 @@ class SysMonitor:
             "percent": m.get("percent"), "used_gib": m.get("used_gib"),
             "total_gib": m.get("total_gib"), "available_gib": m.get("available_gib"),
             "speed_mhz": m.get("speed_mhz"), "temperature_c": mem_temp,
-            "temperature_source": "LibreHardwareMonitor" if mem_temp is not None else None,
+            "temperature_source": (lhm.get("method") or "LibreHardwareMonitor") if mem_temp is not None else None,
             "load_percent": m.get("load_percent"),
             "pcie_read_mbs": m.get("pcie_read_mbs"), "pcie_write_mbs": m.get("pcie_write_mbs"),
             "timestamp": time.time(),
@@ -1823,14 +2021,19 @@ class Handler(BaseHTTPRequestHandler):
 
 
 # ---------------------------------------------------------------------------
-# 开机自启 (Windows): 把 start_gpu_monitor.bat 复制到「启动」文件夹
+# 开机自启: Windows = 启动文件夹快捷脚本; Linux = systemd user unit
 # ---------------------------------------------------------------------------
 def _autostart_path():
-    appdata = os.environ.get("APPDATA", "")
-    if not appdata:
-        return None
-    return os.path.join(appdata, "Microsoft", "Windows", "Start Menu",
-                        "Programs", "Startup", "GPU_Scope_start.bat")
+    if IS_WINDOWS:
+        appdata = os.environ.get("APPDATA", "")
+        if not appdata:
+            return None
+        return os.path.join(appdata, "Microsoft", "Windows", "Start Menu",
+                            "Programs", "Startup", "GPU_Scope_start.bat")
+    if IS_LINUX:
+        return os.path.join(os.path.expanduser("~"), ".config", "systemd", "user",
+                            "gpu-monitor.service")
+    return None
 
 
 def _autostart_active():
@@ -1838,26 +2041,71 @@ def _autostart_active():
     return bool(p and os.path.exists(p))
 
 
-def _set_autostart(enabled):
-    if sys.platform != "win32":
-        return {"ok": False, "error": "仅支持 Windows 系统"}
+def _try_systemctl(action):
+    try:
+        subprocess.run(["systemctl", "--user", action, "gpu-monitor.service"],
+                       capture_output=True, timeout=10, creationflags=CREATE_NO_WINDOW)
+    except Exception:
+        pass
+
+
+def _set_systemd_autostart(enabled):
+    """Linux: 写/删 ~/.config/systemd/user/gpu-monitor.service 并尝试 enable/disable。"""
     dest = _autostart_path()
     if dest is None:
-        return {"ok": False, "error": "找不到启动文件夹"}
-    base = os.path.dirname(os.path.abspath(__file__))
-    src = os.path.join(base, "start_gpu_monitor.bat")
+        return {"ok": False, "error": "无法定位 systemd user 目录"}
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gpu_monitor.py")
+    unit = (
+        "[Unit]\n"
+        "Description=GPU Monitor (GPU_Scope)\n"
+        "After=network.target\n\n"
+        "[Service]\n"
+        "Type=simple\n"
+        'ExecStart="%s" "%s" --port 8080 --interval 0.5\n'
+        "Restart=on-failure\n"
+        "RestartSec=5\n\n"
+        "[Install]\n"
+        "WantedBy=default.target\n" % (sys.executable, script)
+    )
     try:
+        d = os.path.dirname(dest)
+        if not os.path.isdir(d):
+            os.makedirs(d, exist_ok=True)
         if enabled:
-            if not os.path.exists(src):
-                return {"ok": False, "error": "未找到 start_gpu_monitor.bat"}
-            shutil.copyfile(src, dest)
-            return {"ok": True, "enabled": True}
-        else:
-            if os.path.exists(dest):
-                os.remove(dest)
-            return {"ok": True, "enabled": False}
+            with open(dest, "w", encoding="utf-8") as f:
+                f.write(unit)
+            _try_systemctl("enable")
+            return {"ok": True, "enabled": True, "note": "systemd user unit (登录会话后生效)"}
+        _try_systemctl("disable")
+        if os.path.exists(dest):
+            os.remove(dest)
+        return {"ok": True, "enabled": False}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+def _set_autostart(enabled):
+    if IS_WINDOWS:
+        dest = _autostart_path()
+        if dest is None:
+            return {"ok": False, "error": "找不到启动文件夹"}
+        base = os.path.dirname(os.path.abspath(__file__))
+        src = os.path.join(base, "start_gpu_monitor.bat")
+        try:
+            if enabled:
+                if not os.path.exists(src):
+                    return {"ok": False, "error": "未找到 start_gpu_monitor.bat"}
+                shutil.copyfile(src, dest)
+                return {"ok": True, "enabled": True}
+            else:
+                if os.path.exists(dest):
+                    os.remove(dest)
+                return {"ok": True, "enabled": False}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+    if IS_LINUX:
+        return _set_systemd_autostart(enabled)
+    return {"ok": False, "error": "当前平台暂不支持开机自启"}
 
 
 def main():

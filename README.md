@@ -2,7 +2,12 @@
 
 一个轻量的本地 GPU 监测服务：通过 NVIDIA NVML 实时采集利用率、显存、功率、温度、风扇、时钟、节流状态与每进程占用，并在浏览器面板中可视化；同时汇总 CPU / 内存与整机功率，按电价累计耗电量与电费。
 
-> 状态：**个人项目 / 技术预览（pre-release）**。当前聚焦 Windows 平台（部分指标依赖 Windows 性能计数器 / WMI）。以 [MIT 许可证](LICENSE) 开源。
+> 状态：**个人项目 / 技术预览（pre-release）**。以 [MIT 许可证](LICENSE) 开源。
+>
+> **平台支持**：
+> - **Windows** — 全功能（NVML + WMI + 性能计数器 + LibreHardwareMonitor 真实温度/功率），已实机验证。
+> - **Linux** — NVIDIA GPU 全功能（NVML 复用）；CPU 多路（`/proc/cpuinfo`）、温度/功率（hwmon + RAPL，功率需 root 读 RAPL）、systemd 开机自启。代码级验证完成，**待真实 Linux 服务器实机验证**。
+> - **macOS** — 基础指标（psutil：CPU/内存/网络/磁盘）可用；Apple Silicon 无 NVML，GPU 检测与功耗/温度暂不可用（待后续版本）。
 
 ---
 
@@ -46,7 +51,7 @@ watchdog.py     ── 看门狗守护进程 (端口探测 + 主服务崩溃自�
 
 ## 安装
 
-要求 Python ≥ 3.8，且已安装 NVIDIA 驱动（含 NVML）。
+要求 Python ≥ 3.8。GPU 指标需要 NVIDIA 驱动（含 NVML）；非 NVIDIA 平台 GPU 页显示降级提示。
 
 ```bash
 pip install -r requirements.txt
@@ -68,6 +73,18 @@ pip install -r requirements.txt
 - `install_lhm.bat` — 下载 LibreHardwareMonitor（用于真实温度/功率）
 
 > Windows 便捷脚本会自动定位脚本所在目录与 PATH 中的 Python 解释器（`pythonw` 优先），clone 到任意位置均可直接运行。
+
+### 便捷脚本（Linux / macOS）
+
+```bash
+chmod +x start_gpu_monitor.sh stop_gpu_monitor.sh status_gpu_monitor.sh
+./start_gpu_monitor.sh     # 后台启动主服务 + 看门狗
+./status_gpu_monitor.sh    # 查看状态
+./stop_gpu_monitor.sh      # 优雅停止
+```
+
+- Linux 上 CPU 温度来自 hwmon（`coretemp`/`k10temp`）；封装功率来自 RAPL（`/sys/class/powercap/.../energy_uj`），非 root 不可读时自动降级为 TDP 估算。
+- 开机自启：在设置页开启后，会写入 `~/.config/systemd/user/gpu-monitor.service`（systemd 用户级，登录会话后生效）。
 
 启动后访问：**http://localhost:8080**
 
@@ -95,6 +112,8 @@ python gpu_monitor.py --port 8080 --interval 0.5
 ### 验证边界（诚实说明）
 
 - 多卡 GPU / 多路 CPU 的适配逻辑（枚举、逐卡快照、卡片网格、集群汇总、历史聚合）已实现并通过单元测试，但**当前仅在单卡 / 单路环境实机运行验证**；多卡 / 多路路径尚未在真实多卡 / 多路机器上验证，如遇问题请在 Issues 反馈。
+- **Linux**：平台分支（NVML 复用、`/proc/cpuinfo` 多路、hwmon/RAPL 温度功率、systemd 自启）已通过代码级单元测试（模拟数据源），**尚未在真实 Linux 服务器实机验证**；如你有 Linux 服务器（尤其是多卡/多路），欢迎部署后反馈。
+- **macOS**：当前仅基础指标（psutil）可用，Apple Silicon 的 GPU/功耗/温度后端待实现，界面显示降级提示。
 - CI 覆盖核心逻辑（Meter / History / NVML 自愈等），不包含真实硬件采集。
 
 ### 估算值
