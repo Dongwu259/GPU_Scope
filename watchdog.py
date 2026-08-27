@@ -15,7 +15,14 @@ import ctypes
 import urllib.request
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-PY = r"C:\Users\admin\.workbuddy\binaries\python\versions\3.13.12\pythonw.exe"
+# Use the interpreter that launched us (no hard-coded machine paths):
+# watchdog is normally started with pythonw, so sys.executable already
+# points at the correct pythonw.exe; fall back to pythonw next to python.exe.
+PY = sys.executable
+if os.path.basename(PY).lower() == "python.exe":
+    _cand = PY[:-4] + "w.exe"
+    if os.path.exists(_cand):
+        PY = _cand
 SCRIPT = os.path.join(BASE, "gpu_monitor.py")
 PIDFILE = os.path.join(BASE, "monitor.pid")
 STOPFLAG = os.path.join(BASE, "stop.flag")

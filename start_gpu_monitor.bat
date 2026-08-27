@@ -8,10 +8,15 @@ REM  Output/errors are logged to server.log / server_err.log / watchdog.log
 REM  To stop: run stop_gpu_monitor.bat
 REM ============================================================
 setlocal
-cd /d C:\Users\admin\WorkBuddy\GPUmonitor
+cd /d "%~dp0"
 
-set "PY=C:\Users\admin\.workbuddy\binaries\python\versions\3.13.12\pythonw.exe"
-set "SCRIPT=C:\Users\admin\WorkBuddy\GPUmonitor\gpu_monitor.py"
+REM Locate a Python 3.8+ interpreter (deps are bundled in pylibs/, no pip needed)
+set "PY="
+where pythonw >nul 2>nul && set "PY=pythonw.exe"
+if not defined PY where python >nul 2>nul && set "PY=python.exe"
+if not defined PY goto :nopy
+
+set "SCRIPT=%~dp0gpu_monitor.py"
 set "HOST=127.0.0.1"
 set "PORT=8080"
 
@@ -22,7 +27,7 @@ if not errorlevel 1 (
   goto :wd
 )
 
-echo [GPU Monitor] Starting service (pythonw, no console window)...
+echo [GPU Monitor] Starting service (%PY%)...
 start "GPU-Monitor" "%PY%" "%SCRIPT%" --port %PORT% --interval 0.5
 
 REM Wait up to ~10s for the service to come up
@@ -55,3 +60,11 @@ echo.
 echo Press any key to close this window (service + watchdog keep running in background)...
 pause >nul
 endlocal
+exit /b
+
+:nopy
+echo [GPU Monitor] ERROR: Python not found in PATH.
+echo   Install Python 3.8+ (tick "Add python.exe to PATH") from https://www.python.org/downloads/
+echo   then run this script again. Runtime deps are bundled in pylibs/, no pip install needed.
+pause
+exit /b 1

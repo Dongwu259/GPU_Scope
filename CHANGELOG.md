@@ -2,6 +2,12 @@
 
 本项目遵循「功能累加」式记录（暂未采用严格 SemVer）。
 
+## 0.1.3 — 开源前清理（可移植性）
+
+- 消除全部硬编码本机路径：`start/stop/status_gpu_monitor.bat` 改用 `%~dp0` 定位脚本目录；`start_gpu_monitor.bat` 与 `watchdog.py` 自动探测 Python 解释器（PATH 中 `pythonw` 优先，其次 `python`），不再依赖特定安装路径，clone 到任意机器即可运行。
+- `install_lhm.bat` 文案由 GBK 中文改为纯 ASCII 英文，任何代码页的 Windows 均可正常显示与执行。
+- 开源前审计：运行时文件（`history.db` / `meter.json` / `prefs.json` / `auth.json` / 日志 / `pylibs/` / `.workbuddy/`）均已被 `.gitignore` 排除且从未进入 git 历史；已扫描确认无 token / 密钥 / 私钥 / 内网 IP / 本机用户名泄露。
+
 ## 0.1.2 — NVML 句柄自愈（驱动中途重启不再需手动重启）
 
 - 修复 GPU 突然无法识别：根因为启动时一次性创建的 NVML 句柄在驱动不稳定（睡眠唤醒 / 驱动重启 / 系统更新）时损坏，被 `poll_once` 永久复用导致永久 `error` 但不崩溃。

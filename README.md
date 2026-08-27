@@ -62,10 +62,12 @@ pip install -r requirements.txt
 
 ### 便捷脚本（Windows）
 
-- `start_gpu_monitor.bat` — 启动（后台 `pythonw`，无黑窗口）
+- `start_gpu_monitor.bat` — 启动（后台 `pythonw`，无黑窗口；自动使用 PATH 中的 Python，无需修改脚本）
 - `stop_gpu_monitor.bat` — 优雅停止（落盘后退出）
 - `status_gpu_monitor.bat` — 查看运行状态
 - `install_lhm.bat` — 下载 LibreHardwareMonitor（用于真实温度/功率）
+
+> Windows 便捷脚本会自动定位脚本所在目录与 PATH 中的 Python 解释器（`pythonw` 优先），clone 到任意位置均可直接运行。
 
 启动后访问：**http://localhost:8080**
 

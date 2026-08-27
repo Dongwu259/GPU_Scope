@@ -3,7 +3,7 @@ REM ============================================================
 REM  GPU real-time monitor - STATUS
 REM ============================================================
 setlocal
-cd /d C:\Users\admin\WorkBuddy\GPUmonitor
+cd /d "%~dp0"
 set "HOST=127.0.0.1"
 set "PORT=8080"
 

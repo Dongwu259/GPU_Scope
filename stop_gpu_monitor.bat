@@ -5,7 +5,7 @@ REM  Signals the watchdog to exit (via stop.flag) and shuts down the
 REM  main service. The watchdog will NOT restart it after a stop.
 REM ============================================================
 setlocal
-cd /d C:\Users\admin\WorkBuddy\GPUmonitor
+cd /d "%~dp0"
 set "HOST=127.0.0.1"
 set "PORT=8080"
 
