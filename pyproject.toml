@@ -1,13 +1,16 @@
 [project]
 name = "gpu-monitor"
-version = "0.1.0"
+version = "0.1.5"
 description = "实时 GPU 监测监控服务: 利用率 / 显存 / 功率 / 温度 / 等效算力 / 进程 / 历史 / 电费累计"
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [
-    "nvidia-ml-py>=11.495.0",
+    "nvidia-ml-py>=11.495.0,<14",
     "psutil>=5.9.0",
 ]
+
+[tool.setuptools]
+py-modules = ["gpu_monitor", "watchdog"]
 
 [project.scripts]
 gpu-monitor = "gpu_monitor:main"

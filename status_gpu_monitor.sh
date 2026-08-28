@@ -4,7 +4,9 @@
 # ============================================================
 cd "$(dirname "$0")"
 HOST=127.0.0.1
-PORT=8080
+# Follow the port the service actually bound to (may differ on port conflict)
+PORT="${GPU_MONITOR_PORT:-8080}"
+[ -f monitor.port ] && PORT="$(cat monitor.port)"
 
 if curl -s -m 5 "http://${HOST}:${PORT}/api/settings" >/dev/null 2>&1; then
   echo "[GPU Monitor] Running: http://${HOST}:${PORT}"

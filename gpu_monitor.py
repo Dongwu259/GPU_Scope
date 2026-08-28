@@ -17,7 +17,12 @@
   python gpu_monitor.py [--port 8080] [--interval 0.5]
 """
 
+# 版本号唯一真源: CHANGELOG / pyproject.toml / HTTP Server 头 / 前端「关于」卡片
+# 都以此为准。发版时只需改这里 + CHANGELOG 条目。
+__version__ = "0.1.5"
+
 import argparse
+import ctypes
 import json
 import os
 import secrets
@@ -196,6 +201,24 @@ def decode_throttle(reason_bits):
     return [label for bit, label in THROTTLE_REASONS.items() if reason_bits & bit]
 
 
+def _classify_nvml_error(e):
+    """把 NVML 初始化异常归类成前端可直接展示的原因码。
+
+    前端据此显示降级提示, 而不是让用户对着空白面板或永久的"正在连接"发呆。
+    """
+    msg = (str(e) or "").strip()
+    low = msg.lower()
+    if isinstance(e, ImportError) or "no module named" in low:
+        return "pynvml_missing"
+    # 驱动/库相关问题: pynvml 的异常消息不一定包含 "nvml" 字样
+    # (例如 "Driver/library version mismatch" / "Driver Not Loaded"), 故单独匹配
+    if any(k in low for k in ("driver", "library", "mismatch", "not loaded")):
+        return "nvml_driver"
+    if type(e).__name__.startswith("NVMLError") or "nvml" in low:
+        return "nvml_error"
+    return "unknown"
+
+
 def _proc_name(pid):
     """尽力获取进程名 (跨平台: psutil 优先; Windows 兜底 ctypes API)。"""
     if psutil:
@@ -232,6 +255,12 @@ _PDH_SCRIPT = (
     "'{0}={1}' -f $Matches[1], [math]::Round($_.CookedValue/1MB,1) } }}"
 )
 
+# PDH 查询缓存: 每进程显存变化缓慢, 没必要跟着 0.5s 的采样间隔反复 spawn PowerShell
+PROC_MEM_TTL = 5.0
+_PROC_MEM_CACHE = {}
+_PROC_MEM_CACHE_TS = 0.0
+_PROC_MEM_SKIP_NEXT = False
+
 
 def _query_pdh_proc_mem():
     out = {}
@@ -254,6 +283,107 @@ def _query_pdh_proc_mem():
     except Exception:
         pass
     return out
+
+
+def _query_pdh_proc_mem_cached():
+    """每进程显存的带缓存查询。返回 (结果 dict, 本轮是否真的查询过)。
+
+    每 2 秒 spawn 一个 PowerShell 去读 PDH 计数器, 是本项目在 Windows 上最主要的
+    子进程开销 —— 而 PDH 的用途只是给"GPU 进程列表"补一列专用显存, 变化很慢。
+    这里做两件事:
+      1. 缓存 PROC_MEM_TTL 秒, 采样间隔(默认 0.5s)远小于它时不再重复 spawn;
+      2. 上一轮查到"没有任何进程占用 GPU"时, 跳过下一轮查询 —— 空闲机器(监控
+         软件的常态)上这个子进程基本不出现。
+
+    注意"只跳过一轮": 跳过标志必须在本轮清零, 否则一旦进入跳过分支就再也不会
+    查询, 新启动的 GPU 任务永远拿不到显存数据。
+    """
+    global _PROC_MEM_CACHE_TS, _PROC_MEM_CACHE, _PROC_MEM_SKIP_NEXT
+    now = time.monotonic()
+    if now - _PROC_MEM_CACHE_TS < PROC_MEM_TTL:
+        return _PROC_MEM_CACHE, False
+    _PROC_MEM_CACHE_TS = now
+    if _PROC_MEM_SKIP_NEXT:
+        _PROC_MEM_SKIP_NEXT = False
+        return {}, False
+    _PROC_MEM_CACHE = _query_pdh_proc_mem()
+    _PROC_MEM_SKIP_NEXT = not _PROC_MEM_CACHE
+    return _PROC_MEM_CACHE, True
+
+
+# ---------------------------------------------------------------------------
+# 提交内存占比 (load_percent) —— 语义: 已提交内存 / 提交上限
+#   这与任务管理器"已提交 X / Y GB"里的百分比是同一个量。
+#   Windows: kernel32.GlobalMemoryStatusEx, 进程内调用, 不 spawn 子进程。
+#   Linux  : /proc/meminfo 的 Committed_AS / CommitLimit。
+#   macOS  : 无等价概念, 返回 None (前端显示 N/A, 不伪造数值)。
+# ---------------------------------------------------------------------------
+class _MEMORYSTATUSEX(ctypes.Structure):
+    _fields_ = [
+        ("dwLength", ctypes.c_ulong),
+        ("dwMemoryLoad", ctypes.c_ulong),
+        ("ullTotalPhys", ctypes.c_ulonglong),
+        ("ullAvailPhys", ctypes.c_ulonglong),
+        ("ullTotalPageFile", ctypes.c_ulonglong),
+        ("ullAvailPageFile", ctypes.c_ulonglong),
+        ("ullTotalVirtual", ctypes.c_ulonglong),
+        ("ullAvailVirtual", ctypes.c_ulonglong),
+        ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+    ]
+
+
+def _commit_percent_windows():
+    """Windows 提交内存占比 (%), 失败返回 None。
+
+    GlobalMemoryStatusEx 的 ullTotalPageFile / ullAvailPageFile 就是提交上限与
+    剩余可提交量 —— 与性能计数器 "\\\\Memory\\\\% Committed Bytes In Use" 同源,
+    但在本进程内一次调用即可拿到, 省掉一个 PowerShell 子进程。
+    """
+    try:
+        st = _MEMORYSTATUSEX()
+        st.dwLength = ctypes.sizeof(st)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+            return None
+        if not st.ullTotalPageFile:
+            return None
+        used = st.ullTotalPageFile - st.ullAvailPageFile
+        return round(used * 100.0 / st.ullTotalPageFile, 1)
+    except Exception:
+        return None
+
+
+def _commit_percent_linux():
+    """Linux 提交内存占比 (%), 数据缺失返回 None。
+
+    /proc/meminfo 提供 Committed_AS(已提交) 与 CommitLimit(提交上限)。内核在
+    启发式 overcommit 模式下仍会给出 CommitLimit, 因此这个比值与 Windows 的
+    语义可比; 若内核未导出 CommitLimit (部分容器/精简内核) 则返回 None, 而不是
+    拿别的量凑数。
+    """
+    try:
+        vals = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith(("Committed_AS:", "CommitLimit:")):
+                    k, v = line.split(":", 1)
+                    parts = v.split()
+                    if parts:
+                        vals[k] = float(parts[0])  # kB
+        committed = vals.get("Committed_AS")
+        limit = vals.get("CommitLimit")
+        if not committed or not limit:
+            return None
+        return round(committed * 100.0 / limit, 1)
+    except Exception:
+        return None
+
+
+def _commit_percent():
+    if IS_WINDOWS:
+        return _commit_percent_windows()
+    if IS_LINUX:
+        return _commit_percent_linux()
+    return None  # macOS: 无提交内存概念, 保持 N/A
 
 
 # ---------------------------------------------------------------------------
@@ -447,22 +577,52 @@ class Prefs:
             except Exception:
                 pass
 
+    # 各键的取值范围 / 允许值 (防止把界面设置成无意义的值, 例如采样间隔 1e9)
+    LIMITS = {
+        "sampling_interval": (0.1, 10.0),
+        "hist_interval": (1.0, 300.0),
+        "hist_retention_days": (1, 3650),
+        "refresh_interval": (0.5, 10.0),
+        "alert_temp": (0, 120),
+        "alert_util_low": (0, 100),
+    }
+    ENUMS = {
+        "temp_unit": ("C", "F"),
+        "power_unit": ("W", "kW"),
+        "theme": ("auto", "light", "dark"),
+    }
+
     @staticmethod
     def _coerce(key, val):
         default = _PREFS_DEFAULT.get(key)
         if isinstance(default, bool):
+            # 不能直接用 bool(val): 从表单/JSON 字符串传来的 "false" 会被判为 True
+            if isinstance(val, str):
+                return val.strip().lower() in ("1", "true", "yes", "on")
             return bool(val)
-        if isinstance(default, int):
+        if isinstance(default, bool) or isinstance(default, int):
             try:
-                return int(float(val))
+                num = int(float(val))
             except Exception:
                 return default
-        if isinstance(default, float):
+        elif isinstance(default, float):
             try:
-                return float(val)
+                num = float(val)
             except Exception:
                 return default
-        return str(val)
+        else:
+            s = str(val)
+            allowed = Prefs.ENUMS.get(key)
+            if allowed and s not in allowed:
+                return default          # 非法枚举值回退默认, 不写脏数据
+            # 货币符号等自由文本: 限制长度, 避免塞进超长字符串
+            return s[:8] if key == "currency" else s
+        lo, hi = Prefs.LIMITS.get(key, (None, None))
+        if lo is not None and num < lo:
+            return lo
+        if hi is not None and num > hi:
+            return hi
+        return num
 
     def update(self, patch):
         with self.lock:
@@ -481,15 +641,21 @@ class Prefs:
 class Monitor:
     def __init__(self, meter):
         self._last_nvml_reinit = 0.0
+        # GPU 不可用时的诊断信息 (供 /api/metrics 的 gpu_unavailable_reason 使用)
+        self.init_error = None
+        self.init_error_kind = None
         try:
             self._init_nvml()
-        except Exception:
+        except Exception as e:
             # NVML 初始化失败(启动时无驱动/驱动未就绪): 降级运行, 后续由 poll_once 自愈重试
             self.nvml = None
             self.count = 0
             self.handles = []
             self.driver = "unknown"
             self.cuda = "unknown"
+            self.init_error = str(e)
+            self.init_error_kind = _classify_nvml_error(e)
+            _errlog("NVML init failed (%s): %s" % (self.init_error_kind, e))
         self.snapshots = [None] * self.count
         self.lock = threading.Lock()
         self._stop = False
@@ -505,7 +671,7 @@ class Monitor:
         self._gpu_last_energy_wh = []
         # 每 GPU 上次采样时间戳 (用于累计 GPU 运行小时)
         self._gpu_last_ts = []
-        self._start_time = time.time()
+        self._start_time = time.monotonic()
         for h in self.handles:
             try:
                 e0 = self.nvml.nvmlDeviceGetTotalEnergyConsumption(h)
@@ -539,7 +705,7 @@ class Monitor:
         重初始化可拿到新句柄自愈, 无需手动重启服务。
         返回 True 表示已执行一次重初始化尝试(无论成败), 调用方应放弃本轮、下轮用新句柄全量重采。
         """
-        now = time.time()
+        now = time.monotonic()
         if now - self._last_nvml_reinit < 30:
             return False
         self._last_nvml_reinit = now
@@ -564,7 +730,7 @@ class Monitor:
                 self._energy_start.append(e0)
                 self._gpu_last_energy_wh.append((e0 / 3.6e6) if e0 is not None else 0.0)
                 self._gpu_last_ts.append(None)
-            self._start_time = time.time()
+            self._start_time = time.monotonic()
         except Exception:
             pass
         return True
@@ -573,7 +739,7 @@ class Monitor:
     def mem_thread(self):
         while not self._stop:
             # 多 GPU 时 PDH 不区分卡, 复制到每个槽位 (消费级通常单卡)
-            m = _query_pdh_proc_mem()
+            m, _queried = _query_pdh_proc_mem_cached()
             with self._mem_lock:
                 for i in range(self.count):
                     self.proc_mem_mb[i] = m
@@ -584,6 +750,33 @@ class Monitor:
             if idx is None:
                 return [s for s in self.snapshots if s is not None]
             return self.snapshots[idx] if 0 <= idx < self.count else None
+
+    def unavailable_reason(self):
+        """GPU 数据不可用时的原因说明; 数据可用则返回 None。
+
+        前端据此显示降级提示 (区分"没装依赖" / "驱动未就绪" / "没有 NVIDIA 卡" /
+        "NVML 运行时错误"), 避免用户面对一个永远停在「正在连接 NVML …」的空白面板。
+        """
+        snaps = [s for s in (self.snapshots or []) if s is not None]
+        if any("error" not in s for s in snaps):
+            return None              # 至少有一张卡正常 -> 数据可用
+        if snaps:
+            detail = ""
+            for s in snaps:
+                if "error" in s:
+                    detail = str(s["error"])
+                    break
+            return {"code": "nvml_runtime", "detail": detail}
+        if self.count:
+            return None              # 已识别到卡, 只是还没采到第一轮快照
+        kind = self.init_error_kind
+        if not kind or (kind == "unknown" and not self.init_error):
+            # NVML 正常初始化但设备数为 0 -> 机器上没有 NVIDIA GPU
+            kind = "no_gpu"
+            detail = ""      # 没有异常详情, 避免残留上一次的误导信息
+        else:
+            detail = self.init_error or ""
+        return {"code": kind, "detail": detail}
 
     def poll_once(self):
         if not self.handles:
@@ -721,6 +914,20 @@ class Monitor:
         except Exception:
             energy_uJ = None
 
+        # ---- 能耗基线自愈 ----
+        # 启动瞬间 NVML 可能尚未就绪, 导致 __init__ 取到的基线是 None; 此后
+        # 「平均功率(自监控启动)」会永久显示 N/A, 且不会自愈 (自愈只在 NVML
+        # 抛异常时触发, 而这里 NVML 一直是正常的)。首次拿到有效读数时补设基线。
+        if energy_uJ is not None:
+            if self._energy_start[idx] is None:
+                self._energy_start[idx] = energy_uJ
+                self._start_time = time.monotonic()
+            elif energy_uJ < self._energy_start[idx]:
+                # 驱动重启 / 计数器回绕: 能耗计数被清零后重新计数, 旧基线会让
+                # 差分为负。重置基线, 从本轮重新开始统计, 避免显示负功率。
+                self._energy_start[idx] = energy_uJ
+                self._start_time = time.monotonic()
+
         # ---- 持久化累计: 把本次与上次采样的能量差累加到 Meter (跨重启不丢) ----
         if energy_uJ is not None:
             _cur_wh = energy_uJ / 3.6e6
@@ -731,7 +938,7 @@ class Monitor:
         # ---- 累计 GPU 运行小时 (H100 等效) ----
         # 每次采样累加: 利用率(0~1) × 采样间隔(小时) → 该卡本段"加权运行小时",
         # 再乘该卡相对 H100 的算力系数 → H100 等效算力时长。跨重启不丢 (落 meter.json)。
-        _now = time.time()
+        _now = time.monotonic()
         if self._gpu_last_ts[idx] is not None:
             _dt = _now - self._gpu_last_ts[idx]
             if 0 < _dt < 3600:  # 防异常大跳变 (如进程挂起/时钟回拨)
@@ -824,8 +1031,9 @@ class Monitor:
         avg_power = None
         if energy_uJ is not None and self._energy_start[idx] is not None:
             ej = (energy_uJ - self._energy_start[idx]) / 1e3  # J (原始单位为 mJ)
-            el = time.time() - self._start_time
-            if el > 1:
+            el = time.monotonic() - self._start_time
+            # ej < 0 说明计数被重置(驱动重启/回绕), 基线已在上面重设, 本轮跳过
+            if el > 1 and ej > 0:
                 avg_power = ej / el
         # 持久化累计 (跨重启) —— 直接来自 Meter
         gpu_cum_wh = _meter_snap["gpu_energy_wh"]
@@ -835,7 +1043,7 @@ class Monitor:
         return {
             "index": idx, "name": name, "uuid": uuid, "spec": spec,
             "driver": self.driver, "cuda": self.cuda, "timestamp": time.time(),
-            "uptime_s": round(time.time() - self._start_time, 1),
+            "uptime_s": round(time.monotonic() - self._start_time, 1),
             "utilization": {"gpu": round(gpu_u, 1), "memory": round(mem_u, 1)},
             "memory": {
                 "used_mb": round(mem_used_mb, 1), "total_mb": round(mem_total_mb, 1),
@@ -937,6 +1145,7 @@ class LHMClient:
         self._last = 0
         self._lock = threading.Lock()
         self._probe_once()
+        self._consec_fail = 0 if self.available else 1
 
     def _set(self, avail, method, ct, cp, mt):
         with self._lock:
@@ -1020,15 +1229,26 @@ class LHMClient:
                 pass
         return {"cpu_temp": cpu_temp, "cpu_power": cpu_power, "mem_temp": mem_temp}
 
+    # 探测失败后的退避上限(秒): LHM 未安装时, 原来的实现会每 poll_interval
+    # 就重试一次(实际是每 2 秒 spawn 一个 PowerShell 进程), 长期空转很浪费。
+    # 失败越多、间隔越长(指数退避), 一旦成功立即恢复正常频率。
+    BACKOFF_MAX = 300.0
+
     def update(self):
-        now = time.time()
+        now = time.monotonic()
         with self._lock:
-            due = (not self.available) or (now - self._last > self.poll_interval)
+            backoff = 0.0 if self.available else min(
+                self.BACKOFF_MAX, self.poll_interval * (2 ** min(self._consec_fail, 6)))
+            due = (now - self._last) > max(self.poll_interval, backoff)
         if not due:
             return
         self._probe_once()
         with self._lock:
             self._last = now
+            if self.available:
+                self._consec_fail = 0
+            else:
+                self._consec_fail += 1
 
     def snapshot(self):
         with self._lock:
@@ -1059,8 +1279,18 @@ class LinuxThermal:
         self._rapl_prev = None
         self._rapl_prev_t = None
 
+    # hwmon 设备名 -> 是否 CPU 温度传感器。用子串匹配而非全等: 同一驱动在不同
+    # 内核/平台上可能叫 coretemp / coretemp.0 / cpu-thermal / soc_thermal。
+    _CPU_TEMP_NAMES = ("coretemp", "k10temp", "zenpower", "cpu_thermal",
+                       "cpu-thermal", "soc_thermal", "k8temp")
+
     @staticmethod
-    def _read_cpu_temp():
+    def _normalize_milli_c(v):
+        """毫摄氏度 -> 摄氏度。极少数驱动直接以摄氏度上报, 用数量级区分。"""
+        return round(v / 1000.0 if abs(v) > 1000 else float(v), 1)
+
+    @classmethod
+    def _read_hwmon_temp(cls):
         try:
             base = "/sys/class/hwmon"
             for h in sorted(os.listdir(base)):
@@ -1068,22 +1298,67 @@ class LinuxThermal:
                 name = ""
                 try:
                     with open(os.path.join(p, "name")) as f:
-                        name = f.read().strip()
+                        name = f.read().strip().lower()
                 except Exception:
                     pass
-                if name not in ("coretemp", "k10temp", "zenpower", "cpu_thermal"):
+                if not any(k in name for k in cls._CPU_TEMP_NAMES):
                     continue
+                # 直接尝试打开, 不做 os.path.exists 预检: 预检与打开之间存在
+                # TOCTOU 窗口, 而这里的 try/except 已经能处理"文件不存在"。
                 for f in ("temp1_input", "temp0_input", "temp_input"):
-                    fp = os.path.join(p, f)
-                    if os.path.exists(fp):
-                        try:
-                            with open(fp) as fh:
-                                return round(int(fh.read().strip()) / 1000.0, 1)
-                        except Exception:
-                            continue
+                    try:
+                        with open(os.path.join(p, f)) as fh:
+                            return cls._normalize_milli_c(int(fh.read().strip()))
+                    except Exception:
+                        continue
         except Exception:
             pass
         return None
+
+    @staticmethod
+    def _read_thermal_zone_temp():
+        """回退温度源: /sys/class/thermal/thermal_zone*/temp。
+
+        hwmon 白名单覆盖不到的平台 (树莓派 / 多数 ARM 开发板 / 部分虚拟机) 只暴露
+        thermal_zone。取舍: 优先取 type 带 cpu / soc / pkg 的分区; 一个都匹配不上
+        时取所有分区的最高值 —— 对"整机有没有过热"这个用途来说, 宁可报偏高也不报
+        缺失。有匹配项时只用匹配项, 不把 GPU / 电池的分区温度冒充成 CPU 温度。
+        """
+        try:
+            base = "/sys/class/thermal"
+            zones = []
+            for z in sorted(os.listdir(base)):
+                if not z.startswith("thermal_zone"):
+                    continue
+                p = os.path.join(base, z)
+                try:
+                    with open(os.path.join(p, "temp")) as f:
+                        c = LinuxThermal._normalize_milli_c(int(f.read().strip()))
+                    t = ""
+                    try:
+                        with open(os.path.join(p, "type")) as f:
+                            t = f.read().strip().lower()
+                    except Exception:
+                        pass
+                    if 0 < c < 150:  # 过滤 0 / 负数等"不支持"占位值
+                        zones.append((t, c))
+                except Exception:
+                    continue
+            if not zones:
+                return None
+            preferred = [c for t, c in zones if any(k in t for k in ("cpu", "soc", "pkg", "x86"))]
+            if preferred:
+                return max(preferred)
+            return max(c for _, c in zones)
+        except Exception:
+            return None
+
+    @classmethod
+    def _read_cpu_temp(cls):
+        t = cls._read_hwmon_temp()
+        if t is not None:
+            return t
+        return cls._read_thermal_zone_temp()
 
     @staticmethod
     def _read_rapl_energy():
@@ -1099,7 +1374,7 @@ class LinuxThermal:
         return None
 
     def update(self):
-        now = time.time()
+        now = time.monotonic()
         with self._lock:
             due = (not self.available) or (now - self._last > self.poll_interval)
         if not due:
@@ -1165,11 +1440,21 @@ SYS_STATIC = {
 }
 
 
+# PowerShell 的控制台输出编码默认是系统 OEM 代码页 (简体中文 Windows 为 936/GBK),
+# 而 WMI 可能返回非 ASCII 内容 (中文 CPU 型号、中文内存品牌、中文设备名)。若不显式
+# 设置, Python 侧按 UTF-8 解码会得到乱码甚至替换字符 —— 界面上表现为"锟斤拷"式的
+# CPU 名称。在每个脚本前强制把输出编码切成 UTF-8, 才能与下文的 decode("utf-8") 对齐。
+_PS_UTF8_PREFIX = (
+    "$OutputEncoding=[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
+)
+
+
 def _wmi_json(script):
     if not IS_WINDOWS:
         return None  # WMI 为 Windows 专属; 其他平台走 psutil / sysfs 后端
     try:
-        r = subprocess.run(["powershell", "-NoProfile", "-Command", script],
+        r = subprocess.run(["powershell", "-NoProfile", "-Command",
+                            _PS_UTF8_PREFIX + script],
                            capture_output=True, timeout=15,
                            creationflags=CREATE_NO_WINDOW)
         return r.stdout.decode("utf-8", errors="replace").strip()
@@ -1212,11 +1497,22 @@ def _linux_cpu_info():
             return
         pid = cur.get("physical id", "0")
         if pid not in phys:
-            phys[pid] = {"name": cur.get("model name", "CPU"),
-                         "core_ids": set(), "threads": 0, "max_mhz": 0}
+            phys[pid] = {"name": cur.get("model name")
+                         or cur.get("Hardware") or cur.get("hardware")
+                         or "CPU",
+                         "core_ids": set(), "threads": 0, "max_mhz": 0,
+                         "procs": []}
             order.append(pid)
-        phys[pid]["core_ids"].add((cur.get("physical id", "0"),
-                                   cur.get("core id", "")))
+        core_id = cur.get("core id")
+        if core_id is None or core_id == "":
+            # aarch64 (以及部分 ARM 平台) 不提供 physical id / core id:
+            # 退化用 processor 编号作为核心标识。若仍用 "(physical id, core id)"
+            # 作 key, 所有逻辑核都会塌缩成同一个 key, 核心数被误算成 1。
+            key = ("processor", cur.get("processor"))
+        else:
+            key = (cur.get("physical id", "0"), core_id)
+        phys[pid]["core_ids"].add(key)
+        phys[pid]["procs"].append(cur.get("processor", ""))
         try:
             phys[pid]["max_mhz"] = max(phys[pid]["max_mhz"],
                                        int(float(cur.get("cpu MHz", 0) or 0)))
@@ -1241,11 +1537,13 @@ def _linux_cpu_info():
     for pid in order:
         p = phys[pid]
         name = p["name"].strip()
-        # 尝试 cpufreq 标称最高频率 (kHz -> MHz); 失败则回退到当前频率估算
+        # 尝试 cpufreq 标称最高频率 (kHz -> MHz); 失败则回退到当前频率估算。
+        # 必须用真实的 processor 编号 —— 此前用 range(threads) 从 0 开始拼路径,
+        # 多路机器上第二路会读到第一路的 cpufreq 文件。
         mhz = None
-        for cpu0 in range(p["threads"]):
-            fp = "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq" % cpu0
+        for proc_id in p.get("procs") or []:
             try:
+                fp = "/sys/devices/system/cpu/cpu%s/cpufreq/cpuinfo_max_freq" % proc_id
                 with open(fp) as f:
                     mhz = int(f.read().strip()) // 1000
                 break
@@ -1353,7 +1651,7 @@ class SysMonitor:
             "voltage_v": SYS_STATIC["cpu_voltage_v"], "power_w": None,
             "sockets": [],  # 每路 CPU: {name,cores,threads,util,per_core,power_w,tdp_w}
         }
-        self._cpu_last_acc_t = time.time()
+        self._cpu_last_acc_t = time.monotonic()
         self.mem = {
             "percent": 0.0, "used_gib": 0.0, "total_gib": SYS_STATIC["ram_total_gib"] or 0.0,
             "available_gib": 0.0, "speed_mhz": SYS_STATIC["ram_speed_mhz"],
@@ -1414,7 +1712,7 @@ class SysMonitor:
                         "power_w": round(spw, 1), "tdp_w": tdp,
                     })
                 total_pw = sum(s["power_w"] for s in sockets)
-                now = time.time()
+                now = time.monotonic()
                 dt = now - self._cpu_last_acc_t
                 if dt > 0:
                     self.meter.add_cpu(total_pw * dt / 3600.0)  # Wh
@@ -1430,16 +1728,11 @@ class SysMonitor:
 
     # ---- 内存线程: 每 ~2s ----
     def mem_thread(self):
-        perf_commit = (
-            "Get-Counter -Counter '\\Memory\\% Committed Bytes In Use' "
-            "-ErrorAction SilentlyContinue | Select -ExpandProperty CounterSamples "
-            "| ForEach-Object { $_.CookedValue }"
-        )
         while not self._stop:
             try:
                 if psutil:
                     vm = psutil.virtual_memory()
-                    now = time.time()
+                    now = time.monotonic()
                     io = psutil.disk_io_counters()
                     with self.lock:
                         self.mem["percent"] = round(vm.percent, 1)
@@ -1455,18 +1748,17 @@ class SysMonitor:
                         if io:
                             self._last_disk = (io.read_bytes, io.write_bytes)
                             self._last_disk_t = now
-                # 提交内存占比 (负载) via 性能计数器 (仅 Windows; 其他平台用 psutil percent)
-                if IS_WINDOWS:
-                    try:
-                        r = subprocess.run(["powershell", "-NoProfile", "-Command", perf_commit],
-                                           capture_output=True, text=True, timeout=10,
-                                           creationflags=CREATE_NO_WINDOW)
-                        vals = [float(x) for x in r.stdout.split() if x.strip()]
-                        if vals:
-                            with self.lock:
-                                self.mem["load_percent"] = round(vals[0], 1)
-                    except Exception:
-                        pass
+                # 提交内存占比 (负载): 语义是"已提交内存 / 提交上限", 与任务管理器
+                # "已提交 X / Y GB" 的百分比是同一个量。
+                #   Windows -> kernel32.GlobalMemoryStatusEx (进程内, 零子进程)
+                #   Linux   -> /proc/meminfo 的 Committed_AS / CommitLimit
+                #   macOS   -> 无等价概念, 返回 None, 前端显示 N/A (不伪造数值)
+                # 早期实现为每 2 秒 spawn 一个 PowerShell 读性能计数器, 已改为上面的
+                # 进程内实现, 顺带消除了 Windows 上的子进程开销。
+                _cp = _commit_percent()
+                if _cp is not None:
+                    with self.lock:
+                        self.mem["load_percent"] = _cp
             except Exception:
                 pass
             time.sleep(2)
@@ -1475,7 +1767,7 @@ class SysMonitor:
     def io_thread(self):
         while not self._stop:
             try:
-                now = time.time()
+                now = time.monotonic()
                 # 网络: 所有网卡合计收发字节差分 -> MB/s
                 try:
                     n = psutil.net_io_counters()
@@ -1681,8 +1973,18 @@ class History:
         self.path = path
         self.interval = interval
         self.retention_days = retention_days
+        # 写入线程与 HTTP 查询线程会并发使用同一个连接: check_same_thread=False
+        # 允许跨线程, 但必须自己加锁, 否则写事务(prune)与读(query)并发可能抛
+        # "database is locked", 被 except 吞掉后表现为历史图表偶发空白。
+        self.lock = threading.RLock()
         import sqlite3
         self.conn = sqlite3.connect(path, check_same_thread=False)
+        try:
+            # WAL 让读写不再互相阻塞 (会额外产生 history.db-wal / -shm 文件)
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA synchronous=NORMAL")
+        except Exception:
+            pass
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS samples("
             "ts REAL PRIMARY KEY, gpu_pw REAL, gpu_util REAL, gpu_temp REAL, gpu_e_wh REAL,"
@@ -1693,50 +1995,73 @@ class History:
         self._migrate()
 
     def _migrate(self):
-        try:
-            existing = {r[1] for r in self.conn.execute("PRAGMA table_info(samples)").fetchall()}
-            for col, ctype in [("net_rx_mbs", "REAL"), ("net_tx_mbs", "REAL"),
-                               ("disk_read_mbs", "REAL"), ("disk_write_mbs", "REAL")]:
-                if col not in existing:
-                    self.conn.execute("ALTER TABLE samples ADD COLUMN %s %s" % (col, ctype))
-            self.conn.commit()
-        except Exception:
-            pass
+        with self.lock:
+            try:
+                existing = {r[1] for r in self.conn.execute("PRAGMA table_info(samples)").fetchall()}
+                for col, ctype in [("net_rx_mbs", "REAL"), ("net_tx_mbs", "REAL"),
+                                   ("disk_read_mbs", "REAL"), ("disk_write_mbs", "REAL")]:
+                    if col not in existing:
+                        self.conn.execute("ALTER TABLE samples ADD COLUMN %s %s" % (col, ctype))
+                self.conn.commit()
+            except Exception:
+                pass
 
     def add(self, gpu_pw, gpu_util, gpu_temp, gpu_e_wh, cpu_util, cpu_pw, cpu_e_wh,
             mem_pct, total_pw, total_e_wh, total_cost,
             net_rx_mbs=None, net_tx_mbs=None, disk_read_mbs=None, disk_write_mbs=None):
-        try:
-            self.conn.execute(
-                "INSERT OR REPLACE INTO samples VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (time.time(), gpu_pw, gpu_util, gpu_temp, gpu_e_wh, cpu_util, cpu_pw,
-                 cpu_e_wh, mem_pct, total_pw, total_e_wh, total_cost,
-                 net_rx_mbs, net_tx_mbs, disk_read_mbs, disk_write_mbs))
-            self.conn.commit()
-        except Exception:
-            pass
+        with self.lock:
+            try:
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO samples VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (time.time(), gpu_pw, gpu_util, gpu_temp, gpu_e_wh, cpu_util, cpu_pw,
+                     cpu_e_wh, mem_pct, total_pw, total_e_wh, total_cost,
+                     net_rx_mbs, net_tx_mbs, disk_read_mbs, disk_write_mbs))
+                self.conn.commit()
+            except Exception:
+                pass
 
     def prune(self):
-        try:
-            cutoff = time.time() - self.retention_days * 86400.0
-            self.conn.execute("DELETE FROM samples WHERE ts < ?", (cutoff,))
-            self.conn.commit()
-        except Exception:
-            pass
+        """删除超过保留期的样本。
+
+        调用方应控制频率 (目前每小时一次) —— 这是对整表的扫描式 DELETE,
+        每次采样都跑一遍会在历史库变大后造成明显的无谓 IO。
+        """
+        with self.lock:
+            try:
+                cutoff = time.time() - self.retention_days * 86400.0
+                self.conn.execute("DELETE FROM samples WHERE ts < ?", (cutoff,))
+                self.conn.commit()
+            except Exception:
+                pass
+
+    def clear(self):
+        """清空全部历史样本并回收空间 (「清除全部历史」)。"""
+        with self.lock:
+            try:
+                self.conn.execute("DELETE FROM samples")
+                self.conn.commit()
+                try:
+                    self.conn.execute("VACUUM")
+                except Exception:
+                    pass
+                return True
+            except Exception:
+                return False
 
     def query(self, range_key="24h"):
         secs = self.RANGES.get(range_key, 86400)
         start = time.time() - secs
-        try:
-            cur = self.conn.execute(
-                "SELECT ts,gpu_pw,gpu_util,gpu_temp,gpu_e_wh,cpu_util,cpu_pw,cpu_e_wh,"
-                "mem_pct,total_pw,total_e_wh,total_cost,"
-                "net_rx_mbs,net_tx_mbs,disk_read_mbs,disk_write_mbs "
-                "FROM samples WHERE ts>=? ORDER BY ts ASC",
-                (start,))
-            rows = cur.fetchall()
-        except Exception:
-            rows = []
+        with self.lock:
+            try:
+                cur = self.conn.execute(
+                    "SELECT ts,gpu_pw,gpu_util,gpu_temp,gpu_e_wh,cpu_util,cpu_pw,cpu_e_wh,"
+                    "mem_pct,total_pw,total_e_wh,total_cost,"
+                    "net_rx_mbs,net_tx_mbs,disk_read_mbs,disk_write_mbs "
+                    "FROM samples WHERE ts>=? ORDER BY ts ASC",
+                    (start,))
+                rows = cur.fetchall()
+            except Exception:
+                rows = []
         if len(rows) > 720:
             step = len(rows) // 720
             rows = rows[::step]
@@ -1750,16 +2075,17 @@ class History:
         else:
             secs = self.RANGES.get(range_key, 86400)
             start = time.time() - secs
-        try:
-            cur = self.conn.execute(
-                "SELECT ts,gpu_pw,gpu_util,gpu_temp,gpu_e_wh,cpu_util,cpu_pw,cpu_e_wh,"
-                "mem_pct,total_pw,total_e_wh,total_cost,"
-                "net_rx_mbs,net_tx_mbs,disk_read_mbs,disk_write_mbs "
-                "FROM samples WHERE ts>=? ORDER BY ts ASC",
-                (start,))
-            return cur.fetchall()
-        except Exception:
-            return []
+        with self.lock:
+            try:
+                cur = self.conn.execute(
+                    "SELECT ts,gpu_pw,gpu_util,gpu_temp,gpu_e_wh,cpu_util,cpu_pw,cpu_e_wh,"
+                    "mem_pct,total_pw,total_e_wh,total_cost,"
+                    "net_rx_mbs,net_tx_mbs,disk_read_mbs,disk_write_mbs "
+                    "FROM samples WHERE ts>=? ORDER BY ts ASC",
+                    (start,))
+                return cur.fetchall()
+            except Exception:
+                return []
 
     def export_csv(self, range_key="24h"):
         rows = self.rows(range_key)
@@ -1788,7 +2114,9 @@ class History:
                 rec[k] = v
             samples.append(rec)
         return {
-            "tool": "GPU_Scope",
+            # 对外产品名统一为 GPU Monitor (前端"关于"卡片、systemd 描述、启动项
+            # 文件都用它)。GitHub 仓库地址仍为 GPU_Scope —— 那是仓库名, 不是产品名。
+            "tool": "GPU Monitor",
             "generated_at": time.time(),
             "range": range_key,
             "count": len(samples),
@@ -1797,15 +2125,44 @@ class History:
         }
 
     def close(self):
-        try:
-            self.conn.close()
-        except Exception:
-            pass
+        with self.lock:
+            try:
+                self.conn.close()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
 # HTTP 服务
 # ---------------------------------------------------------------------------
+def _is_loopback(host):
+    """该绑定地址是否只监听本机回环。"""
+    return (host or "") in ("127.0.0.1", "localhost", "::1") or \
+        (host or "").startswith("127.")
+
+
+def _origin_allowed(origin):
+    """写请求的 Origin 是否可信 (CSRF 防护)。
+
+    浏览器发起的跨站请求会带 Origin 头。恶意网页可以用 <form enctype="text/plain">
+    构造无需预检的「简单请求」打到 127.0.0.1:8080, 此前后端不做任何校验, 于是
+    /api/shutdown、/api/settings/reset_meter 都能被跨站触发。
+
+    规则:
+      - 没有 Origin 头 (curl / stop 脚本 / 原生客户端) -> 允许, 由 IP + 令牌兜底;
+      - Origin 为回环地址 -> 允许 (面板自身发起的请求);
+      - 其它 Origin -> 只有在携带正确令牌时才允许 (局域网面板会拿到令牌)。
+    """
+    if not origin:
+        return True
+    try:
+        from urllib.parse import urlparse as _up
+        host = (_up(origin).hostname or "").lower()
+    except Exception:
+        return False
+    return host in ("127.0.0.1", "localhost", "::1")
+
+
 class Handler(BaseHTTPRequestHandler):
     monitor = None
     sys = None
@@ -1814,7 +2171,8 @@ class Handler(BaseHTTPRequestHandler):
     prefs = None
     html_path = None
     auth_token = None
-    server_version = "GPUMonitor/1.3"
+    bind_host = "127.0.0.1"   # 由 main() 写入, 用于判断是否对外暴露
+    server_version = "GPUMonitor/%s" % __version__
 
     def _send(self, code, body, content_type="application/json", extra_headers=None):
         if isinstance(body, str):
@@ -1836,20 +2194,35 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 with open(self.html_path, "r", encoding="utf-8") as f:
                     html = f.read()
-                # 注入本地 API 令牌, 使同源页面在开放(--host 0.0.0.0)时也能写操作
-                if Handler.auth_token:
+                # 注入本地 API 令牌, 使同源页面在开放(--host 0.0.0.0)时也能写操作。
+                # 仅绑定回环时不注入: 本地请求本就免鉴权, 没必要把令牌放进页面
+                # (任何能打开面板的人都能 view-source 拿到它)。
+                if Handler.auth_token and not _is_loopback(Handler.bind_host):
                     html = html.replace("__API_TOKEN__", Handler.auth_token)
+                else:
+                    html = html.replace("__API_TOKEN__", "")
+                # 版本号与 __version__ 保持单一真源
+                html = html.replace("__VERSION__", __version__)
                 self._send(200, html, "text/html; charset=utf-8")
             except Exception as e:
                 self._send(500, json.dumps({"error": str(e)}))
             return
         if path == "/api/metrics":
             gpus = self.monitor.get_snapshot()
-            self._send(200, json.dumps({
+            payload = {
                 "gpus": gpus,
                 "cluster": self.monitor.gpu_cluster_summary(),
                 "server_time": time.time(),
-            }))
+            }
+            # GPU 数据为空时附带不可用原因, 前端据此显示降级提示
+            if not gpus:
+                try:
+                    reason = self.monitor.unavailable_reason()
+                except Exception:
+                    reason = None
+                if reason:
+                    payload["gpu_unavailable_reason"] = reason
+            self._send(200, json.dumps(payload))
             return
         if path.startswith("/api/metrics/"):
             try:
@@ -1882,6 +2255,10 @@ class Handler(BaseHTTPRequestHandler):
             if isinstance(snap, dict) and "error" not in snap and Handler.prefs is not None:
                 snap["prefs"] = Handler.prefs.data
                 snap["autostart_active"] = _autostart_active()
+            # 带上自己的 PID: 启动时据此判断"端口上是不是已经有本服务的实例",
+            # 避免重复启动出两个主服务 (它们会同时写 meter.json / history.db)。
+            if isinstance(snap, dict):
+                snap["pid"] = os.getpid()
             self._send(200, json.dumps(snap))
             return
         if path == "/api/history":
@@ -1924,10 +2301,17 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         # 写操作鉴权: 本地 (127.0.0.1/::1) 信任; 远程调用需携带 X-Api-Token
         client_ip = self.client_address[0]
+        _tok = self.headers.get("X-Api-Token") or ""
+        _has_token = bool(Handler.auth_token) and _tok == Handler.auth_token
         if client_ip not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
-            if not Handler.auth_token or self.headers.get("X-Api-Token") != Handler.auth_token:
+            if not _has_token:
                 self._send(403, json.dumps({"error": "forbidden: 远程写操作需要 X-Api-Token 令牌"}))
                 return
+        # CSRF: 浏览器跨站请求会带 Origin。非本服务页面的来源一律拒绝,
+        # 除非它同时持有有效令牌 (局域网面板会拿到令牌, 正常可用)。
+        if not _origin_allowed(self.headers.get("Origin")) and not _has_token:
+            self._send(403, json.dumps({"error": "forbidden: 跨站请求被拒绝 (CSRF 防护)"}))
+            return
         length = int(self.headers.get("Content-Length", 0) or 0)
         raw = self.rfile.read(length) if length else b""
         try:
@@ -1950,8 +2334,17 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps({"ok": True}))
             return
         if meter is not None and path == "/api/settings/reset_all":
+            # 真正的"清除全部历史": 除计量(meter.json)外, 还要清掉 history.db
+            # 里的时序样本 —— 此前只做了前者, 与按钮/文档的说法不符。
             meter.reset_energy()
-            self._send(200, json.dumps({"ok": True}))
+            cleared = False
+            try:
+                if Handler.history is not None:
+                    cleared = bool(Handler.history.clear())
+            except Exception:
+                cleared = False
+            _errlog("reset_all: meter cleared, history cleared=%s" % cleared)
+            self._send(200, json.dumps({"ok": True, "history_cleared": cleared}))
             return
         if path == "/api/settings/prefs":
             try:
@@ -2023,13 +2416,73 @@ class Handler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------------------
 # 开机自启: Windows = 启动文件夹快捷脚本; Linux = systemd user unit
 # ---------------------------------------------------------------------------
+def _bat_encoding():
+    """写入 .bat 时使用的编码。
+
+    cmd.exe 按系统 ANSI 代码页解析 .bat (中文 Windows 为 GBK/936), 因此生成
+    启动脚本时必须用同一编码, 否则含非 ASCII 的项目路径 (如中文目录) 会被
+    误读成乱码, 导致开机自启静默失败。
+    """
+    if not IS_WINDOWS:
+        return "utf-8"
+    # 用 GetACP() 拿系统 ANSI 代码页 (中文 Windows = 936), 这才是 cmd.exe 解析
+    # .bat 时实际使用的编码。不能用 locale.getpreferredencoding(): Python 在
+    # UTF-8 模式下会返回 utf-8, 与 cmd 的代码页不一致, 中文路径会写成乱码。
+    try:
+        import ctypes
+        acp = ctypes.windll.kernel32.GetACP()
+        if acp:
+            return "cp%s" % acp
+    except Exception:
+        pass
+    try:
+        import locale
+        return locale.getpreferredencoding(False) or "utf-8"
+    except Exception:
+        return "utf-8"
+
+
+def _launcher_python():
+    """开机启动器使用的解释器: 优先 pythonw (无控制台窗口)。"""
+    exe = sys.executable or ""
+    if exe:
+        if exe.lower().endswith("python.exe"):
+            cand = exe[:-4] + "w.exe"
+            if os.path.exists(cand):
+                return cand
+        return exe
+    return "pythonw"
+
+
+def _autostart_launcher(base, port=8080):
+    """生成开机启动器内容 (Windows)。
+
+    注意: 不能直接复制 start_gpu_monitor.bat —— 源脚本用 %~dp0 定位自身目录,
+    复制到启动文件夹后 %~dp0 会解析成启动文件夹, 导致找不到 gpu_monitor.py
+    (功能静默失效)。这里把项目路径与解释器路径全部写成绝对路径。
+    """
+    py = _launcher_python()
+    script = os.path.join(base, "gpu_monitor.py")
+    watchdog = os.path.join(base, "watchdog.py")
+    return (
+        '@echo off\r\n'
+        'REM Auto-generated by gpu_monitor.py -- do not edit by hand.\r\n'
+        'cd /d "%s"\r\n'
+        'start "GPU-Monitor" "%s" "%s" --port %s --interval 0.5\r\n'
+        'REM 给主服务一点启动时间, 再拉起看门狗 (避免 watchdog 误判服务已死而重复拉起)\r\n'
+        'timeout /t 5 /nobreak >nul 2>nul\r\n'
+        'if exist "%s" start "GPU-Monitor-WD" "%s" "%s"\r\n'
+        % (base, py, script, port, watchdog, py, watchdog)
+    )
+
+
 def _autostart_path():
     if IS_WINDOWS:
         appdata = os.environ.get("APPDATA", "")
         if not appdata:
             return None
         return os.path.join(appdata, "Microsoft", "Windows", "Start Menu",
-                            "Programs", "Startup", "GPU_Scope_start.bat")
+                            "Programs", "Startup", "GPU-Monitor-startup.bat")
     if IS_LINUX:
         return os.path.join(os.path.expanduser("~"), ".config", "systemd", "user",
                             "gpu-monitor.service")
@@ -2057,7 +2510,7 @@ def _set_systemd_autostart(enabled):
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gpu_monitor.py")
     unit = (
         "[Unit]\n"
-        "Description=GPU Monitor (GPU_Scope)\n"
+        "Description=GPU Monitor\n"
         "After=network.target\n\n"
         "[Service]\n"
         "Type=simple\n"
@@ -2090,12 +2543,15 @@ def _set_autostart(enabled):
         if dest is None:
             return {"ok": False, "error": "找不到启动文件夹"}
         base = os.path.dirname(os.path.abspath(__file__))
-        src = os.path.join(base, "start_gpu_monitor.bat")
         try:
             if enabled:
-                if not os.path.exists(src):
-                    return {"ok": False, "error": "未找到 start_gpu_monitor.bat"}
-                shutil.copyfile(src, dest)
+                # 生成写死绝对路径的启动器 (复制 start_gpu_monitor.bat 会因 %~dp0
+                # 指向启动文件夹而失效, 详见 _autostart_launcher 注释)
+                # 启动文件夹在某些精简系统上可能不存在, 需自行创建
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                # newline="" -> 不做换行翻译, 内容里的 CRLF 原样写入
+                with open(dest, "w", encoding=_bat_encoding(), newline="") as f:
+                    f.write(_autostart_launcher(base))
                 return {"ok": True, "enabled": True}
             else:
                 if os.path.exists(dest):
@@ -2106,6 +2562,146 @@ def _set_autostart(enabled):
     if IS_LINUX:
         return _set_systemd_autostart(enabled)
     return {"ok": False, "error": "当前平台暂不支持开机自启"}
+
+
+# ---------------------------------------------------------------------------
+# 端口: 冲突自动避让 + 运行时信息落盘
+#
+# 端口此前硬编码在 start/stop/status 脚本与 watchdog.py 三处, 改一处忘两处;
+# 更糟的是与同机其他 8080 服务冲突时没有任何提示, 服务静默起不来。现在:
+#   - 主服务绑定失败(端口被占)时向上探测最多 PORT_SCAN 个端口;
+#   - 实际端口写入 monitor.port, watchdog 与启停脚本都从这里读, 单一真源。
+#
+# 用纯文本(只有一个端口号)而非 JSON 是刻意的选择: 启停脚本是 .bat / .sh, 它们
+# 没有 JSON 解析器, 而 `set /p PORT=<monitor.port` 与 `$(cat monitor.port)`
+# 在这两种脚本里都是零依赖的。
+# ---------------------------------------------------------------------------
+PORT_SCAN = 10
+PORT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monitor.port")
+
+
+def _write_port_file(port):
+    try:
+        with open(PORT_FILE, "w", encoding="ascii") as f:
+            f.write("%d\n" % port)
+    except Exception:
+        pass
+
+
+def _remove_port_file():
+    try:
+        if os.path.exists(PORT_FILE):
+            os.remove(PORT_FILE)
+    except Exception:
+        pass
+
+
+PID_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monitor.pid")
+
+
+def _live_main_pid():
+    """monitor.pid 中"存活且确实本服务"的 PID; 没有或无法确认则返回 None。
+
+    与 watchdog.is_main_process 同样的谨慎: 必须校验命令行里含 gpu_monitor.py,
+    否则 PID 被系统复用给别的进程时会误判成"已有一个实例"。
+    """
+    try:
+        with open(PID_FILE) as f:
+            pid = int(f.read().strip())
+    except Exception:
+        return None
+    if pid <= 0 or pid == os.getpid():
+        return None
+    if psutil is None:
+        return None              # 无 psutil 时无法校验, 宁可不检测也不误判
+    try:
+        cmd = " ".join(psutil.Process(pid).cmdline())
+    except Exception:
+        return None
+    return pid if "gpu_monitor.py" in cmd else None
+
+
+def _serving_pid(port):
+    """探测该端口上提供本服务 API 的进程 PID; 没有则 None。"""
+    try:
+        import urllib.request
+        with urllib.request.urlopen("http://127.0.0.1:%d/api/settings" % port,
+                                    timeout=2) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+        p = data.get("pid")
+        return int(p) if p else None
+    except Exception:
+        return None
+
+
+def _detect_duplicate(port):
+    """是否已有本服务实例在该端口上服务。返回其 PID, 没有则 None。
+
+    背景: 以前两个实例能同时 LISTEN 同一个端口 (Windows 的 SO_REUSEADDR 允许
+    重复绑定), 结果就是双份 NVML 轮询、双份历史写入, 而 meter.json 由两者互相
+    覆盖 —— 能耗累计因此丢失增量。MonitorHTTPServer 关掉 SO_REUSEADDR 并启用
+    SO_EXCLUSIVEADDRUSE 之后, 端口冲突会真实报错; 这里再补一道显式检测, 让
+    "重复启动"变成一个明确的、有日志的动作, 而不是悄悄跑起来第二个实例。
+    """
+    if not _live_main_pid():
+        return None             # 没有疑似实例 -> 立即放行, 不增加启动耗时
+    # 确实有一个本服务进程在跑: 它可能在冷启动中还没监听端口, 给它一点时间
+    for _ in range(20):         # 最多约 10 秒
+        pid = _serving_pid(port)
+        if pid and pid != os.getpid():
+            return pid
+        time.sleep(0.5)
+    return None
+
+
+class MonitorHTTPServer(ThreadingHTTPServer):
+    """按平台区分 SO_REUSEADDR 语义的 HTTP 服务器。
+
+    POSIX 上需要 SO_REUSEADDR —— 否则服务重启会卡在前一个连接的 TIME_WAIT 上,
+    表现为"刚 stop 就 start 起不来"。
+
+    Windows 上 SO_REUSEADDR 的含义完全不同: 它允许两个进程绑定同一个端口
+    (除非对方设置了 SO_EXCLUSIVEADDRUSE)。后果有两重, 都必须避免:
+      1. 端口冲突检测形同虚设 —— 别的程序占着 8080, 我们的 bind 依然"成功",
+         于是 _bind_server 的自动避让永远不会被触发;
+      2. 更糟的是同机其他进程可以后来居上绑到同一个端口, 劫持本服务的流量。
+    因此 Windows 上关掉 SO_REUSEADDR 并显式设置 SO_EXCLUSIVEADDRUSE: 端口被占
+    时 bind 会真实失败, 冲突才会被上面 _bind_server 看到并自动换端口。
+    """
+
+    allow_reuse_address = not IS_WINDOWS
+
+    def server_bind(self):
+        if IS_WINDOWS:
+            try:
+                self.socket.setsockopt(socket.SOL_SOCKET,
+                                       socket.SO_EXCLUSIVEADDRUSE, 1)
+            except Exception:
+                pass
+        super().server_bind()
+
+
+def _bind_server(host, port):
+    """绑定端口; 被占用时向上探测最多 PORT_SCAN 个。返回 (server, 实际端口)。
+
+    只在"端口确实被占用"时避让 —— 其他绑定错误(权限不足、地址无效)直接抛出,
+    否则会把真正的配置错误掩盖成"换了个端口悄悄跑了"。
+    """
+    last = None
+    for offset in range(PORT_SCAN + 1):
+        candidate = port + offset
+        try:
+            srv = MonitorHTTPServer((host, candidate), Handler)
+            if offset:
+                print(f"> 端口 {port} 已被占用, 自动改用 {candidate}")
+                _errlog("port %d in use -> fell back to %d" % (port, candidate))
+            return srv, candidate
+        except OSError as e:
+            last = e
+            if getattr(e, "errno", None) not in (98, 10048):  # EADDRINUSE / WSAEADDRINUSE
+                raise
+            continue
+    raise last
 
 
 def main():
@@ -2122,6 +2718,18 @@ def main():
                     help="历史数据保留天数(默认 30)")
     args = ap.parse_args()
 
+    # 单实例检查必须最先做 —— 早到"写 monitor.pid"之前。否则重复启动的实例会先把
+    # PID 文件改写成自己的 PID, 再往下走检测时 _live_main_pid() 已经读到自己
+    # (或读到已被覆盖掉的假值), 检测形同虚设; 更糟的是健康实例的 PID 被弄丢,
+    # 之后谁都认不出"到底哪个进程在服务"。
+    _dup = _detect_duplicate(args.port)
+    if _dup:
+        msg = ("已有实例在端口 %d 上运行 (pid=%d), 本次启动退出 —— "
+               "如需重启请先执行 stop_gpu_monitor" % (args.port, _dup))
+        print("> " + msg)
+        _errlog("duplicate instance detected: %s" % msg)
+        return
+
     # 本地 API 令牌: 远程写操作鉴权用 (localhost 信任, 无需令牌)
     auth_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auth.json")
     auth_token = None
@@ -2137,6 +2745,16 @@ def main():
     except Exception:
         auth_token = secrets.token_hex(16)
     Handler.auth_token = auth_token
+
+    # 写入 PID 文件: stop 脚本与 watchdog 用它精确定位本进程。
+    # 必须由主服务自己写 —— Windows 的 start 脚本用 `start` 启动拿不到子进程 PID,
+    # 此前 monitor.pid 会长期停留在几天前的旧值, stop 时存在 PID 复用误杀风险。
+    # (watchdog 终止前会校验该 PID 的命令行确实包含 gpu_monitor.py, 双重保险)
+    try:
+        with open(PID_FILE, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+    except Exception:
+        pass
 
     # 持久化计量表 (累计能耗 / 电费 / 电价 / 每日明细)
     meter_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "meter.json")
@@ -2185,8 +2803,10 @@ def main():
     Handler.history = history
     Handler.prefs = prefs
     Handler.html_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html")
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
-    url = f"http://localhost:{args.port}"
+    Handler.bind_host = args.host
+    server, port = _bind_server(args.host, args.port)
+    url = f"http://localhost:{port}"
+    _write_port_file(port)
 
     # 后台周期落盘, 保证异常退出也能持久化
     def _saver():
@@ -2197,6 +2817,9 @@ def main():
 
     # 后台历史采样写入 (按 --hist-interval 采样当前快照到 history.db)
     def _history_writer():
+        # prune 是对整表的扫描式 DELETE, 历史库到几十万行后每次采样都跑一遍
+        # 会造成明显的无谓 IO —— 改为每小时一次 (并保留启动时的一次)。
+        _last_prune = 0.0
         while not getattr(monitor, "_stop", False):
             try:
                 time.sleep(history.interval)
@@ -2227,7 +2850,9 @@ def main():
                 dw = io["disk"]["write_mbs"] if io else None
                 history.add(gpw, gu, gt, ge, cu, cpw, ce, mp, total_pw, te, tc,
                             nrx, ntx, dr, dw)
-                history.prune()
+                if time.monotonic() - _last_prune > 3600:
+                    history.prune()
+                    _last_prune = time.monotonic()
             except Exception:
                 pass
     threading.Thread(target=_history_writer, daemon=True).start()
@@ -2271,6 +2896,9 @@ def main():
             server.shutdown()
         except Exception:
             pass
+        # os._exit 不触发 atexit, 这里必须显式清理端口文件, 否则 watchdog 会
+        # 继续探测一个已经没人监听的端口。
+        _remove_port_file()
         os._exit(0)
     try:
         import signal
@@ -2280,6 +2908,9 @@ def main():
     import atexit
     atexit.register(lambda: _errlog("atexit: process exiting (clean exit -> NOT killed/OOM)"))
     atexit.register(lambda: _safe_save(meter))
+    # 退出时清掉 monitor.port: 残留它会让 watchdog 继续探测一个已经没人监听的端口,
+    # 表现为"服务已停但 watchdog 认为还活着/或不断重启"。
+    atexit.register(_remove_port_file)
 
     # serve_forever 自愈: 若因异常退出(非 KeyboardInterrupt), 记录并重建 server 继续服务, 避免"莫名关闭"
     while True:
@@ -2308,7 +2939,7 @@ def main():
             except Exception:
                 pass
             time.sleep(1)
-            server = ThreadingHTTPServer((args.host, args.port), Handler)
+            server, port = _bind_server(args.host, port)
             continue
 
 

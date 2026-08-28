@@ -46,6 +46,16 @@ python tests/test_core.py
 
 测试退出码非 0 表示有失败项。提交前请确保测试通过。
 
+跨平台分支（Linux 的 `/proc/cpuinfo`、hwmon、RAPL、systemd 自启；Windows 自启启动器；
+偏好校验；安全护栏）由第二套测试覆盖，**同样无需 GPU，且在 Windows 上也能跑**
+（内部用模拟数据源）：
+
+```bash
+python tests/test_crossplatform.py
+```
+
+提交前两套测试都应通过。
+
 也可使用 pytest（可选）：
 
 ```bash
@@ -62,6 +72,17 @@ pytest
 - 缩进 4 空格，遵循 PEP 8；中文注释无限制，鼓励写清楚「为什么」。
 - 涉及 Windows 性能计数器 / WMI / `subprocess` 调用时，注意无控制台弹窗（参考 `CREATE_NO_WINDOW` 用法）。
 - `.bat` 文件保持 **纯 ASCII**（Windows cmd 默认 GBK 解析，UTF-8 中文会乱码）。
+- **不要在 Git Bash / MSYS 里执行 `curl ... > nul`**：`nul` 是 Windows 的保留设备名，
+  cmd 里代表"丢弃输出"，但 Git Bash 会把它当成**普通文件名**，在项目根目录留下一个
+  叫 `nul` 的垃圾文件。它已被 `.gitignore` 忽略，不会入库；由于是保留设备名，常规
+  `rm` / 资源管理器都删不掉，需要手动执行：
+
+  ```bat
+  del "\\?\C:\完整路径\GPUmonitor\nul"
+  ```
+
+  PowerShell 下等价写法：`Remove-Item -LiteralPath "\\?\C:\完整路径\GPUmonitor\nul"`。
+  在脚本里想丢弃输出请用 `>NUL`（cmd）或 `>/dev/null`（Git Bash）。
 
 ---
 
@@ -93,6 +114,16 @@ gpu_monitor.py        主服务: NVML 轮询线程 + 标准库 HTTP 服务
 index.html            前端面板 (原生 Canvas 图表, 无外部依赖)
 watchdog.py           看门狗: 端口探测 + 主服务崩溃自动重启
 install_lhm.bat       下载 LibreHardwareMonitor (真实 CPU/内存温度功率)
-*.bat                 启动/停止/状态 便捷脚本
-tests/test_core.py    核心逻辑测试 (无需 GPU)
+*.bat / *.sh          启动/停止/状态 便捷脚本 (Windows / Linux+macOS)
+tests/test_core.py           核心逻辑测试 (无需 GPU)
+tests/test_crossplatform.py  跨平台与安全护栏测试 (模拟数据源, 无需 GPU)
 ```
+
+## 端口约定
+
+默认端口 **8080**。若被其他程序占用，主服务会**自动向上探测**（最多 +10）并把实际
+端口写入 `monitor.port`；watchdog 与启停脚本都读这个文件，因此三者始终一致，不需要
+手动改脚本。
+
+想固定端口，设置环境变量 `GPU_MONITOR_PORT`（脚本与 watchdog 都会遵守）；它只在
+`monitor.port` 不存在时生效 —— 服务一旦启动，实际端口以 `monitor.port` 为准。

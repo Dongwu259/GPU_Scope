@@ -7,9 +7,11 @@
 set -e
 cd "$(dirname "$0")"
 HOST=127.0.0.1
-PORT=8080
+# Follow the port the service actually bound to (may differ on port conflict)
+PORT="${GPU_MONITOR_PORT:-8080}"
+[ -f monitor.port ] && PORT="$(cat monitor.port)"
 
-echo "[GPU Monitor] Stopping (graceful shutdown)..."
+echo "[GPU Monitor] Stopping (graceful shutdown) on port ${PORT} ..."
 
 # 1) Tell the watchdog to exit (so it won't auto-restart the service)
 echo 1 > stop.flag

@@ -2,6 +2,9 @@
 __pycache__/
 *.pyc
 history.db
+# WAL 模式产生的附带文件 (启用 journal_mode=WAL 后出现)
+history.db-wal
+history.db-shm
 meter.json
 prefs.json
 # 含本地 API 令牌, 切勿提交
@@ -11,6 +14,8 @@ auth.json
 nul
 server_err.log
 monitor.pid
+# 主服务实际监听的端口 (端口冲突自动避让后写入, 供 watchdog 与启停脚本读取)
+monitor.port
 
 # ---- 本地依赖目录 (按项目安装, 不入库) ----
 pylibs/
@@ -27,6 +32,8 @@ LibreHardwareMonitor/
 # ---- 守护进程运行时状态 ----
 watchdog.lock
 *.lock
+# stop 脚本创建的一次性信号文件 (watchdog 消费后删除)
+stop.flag
 
 # ---- Python 标准忽略 ----
 *.egg-info/

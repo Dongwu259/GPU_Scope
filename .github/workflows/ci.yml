@@ -28,5 +28,8 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip install -r requirements.txt
 
-      - name: 运行核心测试（无需 GPU）
+      - name: 运行核心测试（Meter / History / 节流解码，无需 GPU）
         run: python3 tests/test_core.py
+
+      - name: 运行跨平台测试（模拟 /proc/cpuinfo、hwmon、RAPL，无需目标 OS）
+        run: python3 tests/test_crossplatform.py

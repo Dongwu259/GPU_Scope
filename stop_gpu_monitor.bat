@@ -7,9 +7,12 @@ REM ============================================================
 setlocal
 cd /d "%~dp0"
 set "HOST=127.0.0.1"
-set "PORT=8080"
+set "PORT=%GPU_MONITOR_PORT%"
+if not defined PORT set "PORT=8080"
+REM Follow the port the service actually bound to (may differ on port conflict)
+if exist monitor.port set /p PORT=<monitor.port
 
-echo [GPU Monitor] Stopping (graceful shutdown)...
+echo [GPU Monitor] Stopping (graceful shutdown) on port %PORT% ...
 
 REM 1) Tell the watchdog to exit (so it won't auto-restart the service)
 echo 1 > stop.flag
@@ -26,4 +29,7 @@ for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":%PORT%" ^| findstr "
 )
 
 echo [GPU Monitor] Stopped.
+echo.
+echo Press any key to close this window...
+pause >nul
 endlocal

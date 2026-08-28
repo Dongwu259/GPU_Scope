@@ -333,6 +333,7 @@
       <div class="page-head">
         <h2 id="gpuName">GPU 监测面板</h2>
         <div class="sub" id="gpuSub">正在连接 NVML …</div>
+        <div class="sub" id="connTip" style="display:none"></div>
       </div>
 
       <!-- 选卡网格: 进入先看卡片, 点击进入对应 GPU 详情 (单卡只显示一张) -->
@@ -828,7 +829,7 @@
           <h3>开机自启 <span class="tag">Windows</span></h3>
           <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:14px">
             <input id="setAutostart" type="checkbox" style="width:18px;height:18px" />
-            <span>登录 Windows 时自动启动 GPU_Scope 监测服务</span>
+            <span>登录 Windows 时自动启动 GPU Monitor 监测服务</span>
           </label>
           <div class="note" style="margin-top:12px">实现方式：将 <code>start_gpu_monitor.bat</code> 复制到「启动」文件夹。仅 Windows 有效，其他系统忽略。</div>
           <div id="autostartState" class="note" style="margin-top:8px"></div>
@@ -894,10 +895,10 @@
       </div>
 
       <div class="card" style="margin-bottom:14px">
-        <h3>关于 GPU_Scope <span class="tag">开源 · MIT</span></h3>
+        <h3>关于 GPU Monitor <span class="tag">开源 · MIT</span></h3>
         <div class="kv" id="setAbout">
-          <div class="row"><span class="k">项目名称</span><span class="v">GPU_Scope</span></div>
-          <div class="row"><span class="k">版本</span><span class="v">0.1.0</span></div>
+          <div class="row"><span class="k">项目名称</span><span class="v">GPU Monitor</span></div>
+          <div class="row"><span class="k">版本</span><span class="v">__VERSION__</span></div>
           <div class="row"><span class="k">许可证</span><span class="v">MIT License</span></div>
           <div class="row"><span class="k">作者</span><span class="v">Dongwu259</span></div>
         </div>
@@ -963,7 +964,7 @@ var ZH2EN = {
   "显示偏好":"Display Preferences","告警阈值":"Alert Thresholds","开机自启":"Auto-start on Boot","Windows":"Windows",
   "电价设置":"Electricity Price","持久化计量状态":"Persisted Meter State","跨重启保存于 meter.json":"Saved across restarts in meter.json",
   "每日耗电明细":"Daily Energy Breakdown","最近 7 天":"Last 7 days","数据管理":"Data Management",
-  "关于 GPU_Scope":"About GPU_Scope","开源 · MIT":"Open Source · MIT",
+  "关于 GPU Monitor":"About GPU Monitor","开源 · MIT":"Open Source · MIT",
   // 标签 / 字段
   "集群内 NVIDIA GPU 总数":"Total NVIDIA GPUs in cluster","多路 CPU 物理核心合计":"Total physical cores across CPU sockets",
   "采样间隔 (秒)":"Sampling Interval (s)","历史采样间隔 (秒)":"History Sampling Interval (s)","历史保留天数":"History Retention (days)",
@@ -980,7 +981,7 @@ var ZH2EN = {
   "可用":"Available","频率":"Frequency","负载 (提交内存占比)":"Load (committed memory ratio)",
   "PCIe 读 (存储)":"PCIe Read (storage)","PCIe 写 (存储)":"PCIe Write (storage)","项目名称":"Project Name",
   "版本":"Version","许可证":"License","作者":"Author",
-  "登录 Windows 时自动启动 GPU_Scope 监测服务":"Auto-start GPU_Scope monitor service when logging into Windows",
+  "登录 Windows 时自动启动 GPU Monitor 监测服务":"Auto-start GPU Monitor service when logging into Windows",
   "GPU 累计耗电":"GPU Cumulative Energy","CPU 累计耗电":"CPU Cumulative Energy","合计耗电":"Total Energy",
   "预估电费":"Estimated Cost","电价":"Electricity Price","首次记录":"First Record","最近更新":"Last Updated",
   // 选项
@@ -1155,6 +1156,7 @@ const H = { flops:[], gpu:[], mem:[], pwr:[], tmp:[], smclk:[], memclk:[], enc:[
 let activePage = "overview";
 let curFlops = null, latestCpu = null, latestMem = null;
 let latestGpu = null, latestGpus = [], latestCluster = null, selectedGpuIdx = 0, selectedCpuIdx = 0;
+let latestGpuReason = null;   // /api/metrics 返回的 gpu_unavailable_reason
 let procData = [], procSort = {key: "vram_mb", dir: -1};
 let histRange = "24h";
 let _notifKey = "", _notifTs = 0;   // 告警通知去重
@@ -1354,6 +1356,9 @@ function renderGpu(g){
   latestGpu=g;
   curFlops=g.compute.effective_tflops;
   // 页标题/副标题改由 buildGpuCards 维护 (集群视角); 此处仅保留选中卡的 GPU 型号简述
+  // 有有效数据时清掉降级提示留下的警示样式 (服务重启后 GPU 恢复的场景)
+  const _gs=document.getElementById("gpuSub");
+  if(_gs){ _gs.className="sub"; _gs.style.color=""; }
   document.getElementById("gpuSub").textContent=t(
     '选中 GPU {{i}} · 驱动 {{drv}} · CUDA {{cuda}} · {{arch}} · {{cc}} CUDA 核 · {{tc}} Tensor 核',
     'Selected GPU {{i}} · Driver {{drv}} · CUDA {{cuda}} · {{arch}} · {{cc}} CUDA cores · {{tc}} Tensor cores',
@@ -1479,7 +1484,7 @@ function renderGpu(g){
     if(("Notification" in window) && Notification.permission==="granted"){
       const key=(at>0&&tp>=at?"T":"")+(au>0&&uG<au?"U":"")+(g.throttle_reasons&&g.throttle_reasons.length?"H":"");
       const now=Date.now();
-      if(_notifKey!==key || now-_notifTs>60000){ _notifKey=key; _notifTs=now; try{ new Notification(t("GPU_Scope 告警","GPU_Scope Alert"),{body:msgs[0]}); }catch(e){} }
+      if(_notifKey!==key || now-_notifTs>60000){ _notifKey=key; _notifTs=now; try{ new Notification(t("GPU Monitor 告警","GPU Monitor Alert"),{body:msgs[0]}); }catch(e){} }
     }
   } else { al.className="alert"; setStatus(uG>3?"ok":"warn"); }
 }
@@ -1499,7 +1504,7 @@ function renderProcTable(){
     const vram=p.vram_mb!=null?(p.vram_mb/1024).toFixed(2)+" GB":'<span style="color:var(--muted)">N/A</span>';
     return `<tr>
       <td>${p.pid}</td>
-      <td class="proc">${p.name}</td>
+      <td class="proc">${esc(p.name)}</td>
       <td><span class="pill ${p.compute?'c':'g'}">${p.compute?t('C','Compute'):t('G','Graphics')}</span></td>
       <td><div style="display:flex;align-items:center;gap:6px"><div class="ubar"><i class="b-acc" style="width:${sm}%"></i></div>${sm}%</div></td>
       <td><div style="display:flex;align-items:center;gap:6px"><div class="ubar"><i class="b-mem" style="width:${mu}%"></i></div>${mu}%</div></td>
@@ -1739,8 +1744,8 @@ function renderOverview(){
         const tx = (i.tx_mbs!=null)? i.tx_mbs : "--";
         const ip = i.ip ? i.ip : "—";
         return `<div style="display:flex;justify-content:space-between;font-size:12px;color:#cbd5e1;padding:3px 0;border-bottom:1px solid rgba(255,255,255,.05)">
-          <span><i style="display:inline-block;width:7px;height:7px;border-radius:50%;${dot};margin-right:6px"></i>${i.name}</span>
-          <span style="color:#9ca3af">${ip} · ${spd}</span>
+          <span><i style="display:inline-block;width:7px;height:7px;border-radius:50%;${dot};margin-right:6px"></i>${esc(i.name)}</span>
+          <span style="color:#9ca3af">${esc(ip)} · ${esc(spd)}</span>
           <span>↓${rx} ↑${tx}</span></div>`;
       }).join("");
     } else if(nb){
@@ -1756,8 +1761,8 @@ function renderOverview(){
         const w = Math.max(0, Math.min(100, p.pct||0));
         const cls = w>85 ? "b-pwr" : "b-acc";
         return `<div style="margin:6px 0">
-          <div style="display:flex;justify-content:space-between;font-size:12px;color:#9ca3af">
-            <span>${p.mount}</span><span>${p.used_gib} / ${p.total_gib} GB · ${p.pct}%</span>
+            <div style="display:flex;justify-content:space-between;font-size:12px;color:#9ca3af">
+              <span>${esc(p.mount)}</span><span>${p.used_gib} / ${p.total_gib} GB · ${p.pct}%</span>
           </div>
           <div class="bar"><i class="${cls}" style="width:${w}%"></i></div>
         </div>`;
@@ -1771,7 +1776,7 @@ function renderOverview(){
           const rd = (d.read_mbs!=null)? d.read_mbs : "--";
           const wr = (d.write_mbs!=null)? d.write_mbs : "--";
           return `<div style="display:flex;justify-content:space-between;font-size:12px;color:#cbd5e1;padding:2px 0;border-bottom:1px solid rgba(255,255,255,.05)">
-            <span>${d.name}</span><span>${t("读 {{rd}} · 写 {{wr}} MB/s","Read {{rd}} · Write {{wr}} MB/s",{rd:rd,wr:wr})}</span></div>`;
+            <span>${esc(d.name)}</span><span>${t("读 {{rd}} · 写 {{wr}} MB/s","Read {{rd}} · Write {{wr}} MB/s",{rd:rd,wr:wr})}</span></div>`;
         }).join("");
     }
   }
@@ -1874,6 +1879,43 @@ bindProcSort();
 
 /* ---------------- 多卡 GPU 选择卡片 ---------------- */
 // 进入 GPU 页面先看卡片网格; 点击卡片进入对应详情 (单卡只显示一张卡片)
+// HTML 转义: 进程名 / 网卡名 / 磁盘名 / 挂载点等来自系统的字符串在插入
+// innerHTML 前必须转义, 否则恶意进程名可注入脚本 (XSS)。
+function esc(s){
+  return String(s==null?"":s).replace(/[&<>"']/g,function(c){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];
+  });
+}
+
+// GPU 数据不可用时的降级提示 (见 gpu_monitor.py 的 gpu_unavailable_reason)
+var GPU_UNAVAIL_ZH = {
+  pynvml_missing: "未检测到 GPU 数据：Python 依赖 pynvml 未安装。请在项目目录执行 pip install -r requirements.txt，然后重启监测服务。",
+  nvml_driver:    "未检测到 GPU 数据：NVML 初始化失败，通常是 NVIDIA 驱动未就绪或驱动与库版本不匹配。请确认已安装 NVIDIA 驱动，然后重启监测服务。",
+  nvml_runtime:   "GPU 采样失败：NVML 运行时错误（驱动可能中途重启或句柄失效）。服务正在自动重试，若长时间未恢复请重启监测服务。",
+  no_gpu:         "未检测到 NVIDIA GPU。本工具依赖 NVIDIA NVML，暂不支持 AMD / Intel 独显与 Apple Silicon；CPU、内存、网络与磁盘监测不受影响。",
+  service_unreachable: "无法连接到监测服务。请确认服务已启动（start_gpu_monitor.bat / start_gpu_monitor.sh），并检查端口 8080 是否被其他程序占用（详见 server_err.log）。",
+  unknown:        "未检测到 GPU 数据，请查看项目目录下的 server_err.log 获取详情。"
+};
+var GPU_UNAVAIL_EN = {
+  pynvml_missing: "No GPU data: the Python package pynvml is not installed. Run pip install -r requirements.txt in the project directory, then restart the service.",
+  nvml_driver:    "No GPU data: NVML initialization failed — usually the NVIDIA driver is not ready or there is a driver/library version mismatch. Install the NVIDIA driver and restart the service.",
+  nvml_runtime:   "GPU sampling failed: NVML runtime error (the driver may have restarted or handles became stale). The service retries automatically; restart it if this persists.",
+  no_gpu:         "No NVIDIA GPU detected. This tool relies on NVIDIA NVML and does not support AMD / Intel discrete GPUs or Apple Silicon. CPU, memory, network and disk monitoring are unaffected.",
+  service_unreachable: "Cannot reach the monitoring service. Make sure it is running (start_gpu_monitor.bat / start_gpu_monitor.sh) and that port 8080 is not taken by another program (see server_err.log).",
+  unknown:        "No GPU data. See server_err.log in the project directory for details."
+};
+function renderGpuUnavailable(reason){
+  const box=document.getElementById("gpuCards");
+  if(box){ box.style.display="none"; box.innerHTML=""; }
+  const sub=document.getElementById("gpuSub");
+  if(!sub) return;
+  const code=(reason&&reason.code)||"unknown";
+  const tbl=(LANG==="en")?GPU_UNAVAIL_EN:GPU_UNAVAIL_ZH;
+  sub.textContent=tbl[code]||tbl.unknown;
+  sub.className="sub warn";
+  sub.style.color="var(--amber)";
+}
+
 function buildGpuCards(){
   const box=document.getElementById("gpuCards");
   if(!box) return;
@@ -1881,7 +1923,7 @@ function buildGpuCards(){
   // 页标题 (集群视角, 不被单卡详情覆盖)
   const title=document.getElementById("gpuName");
   if(title) title.textContent = n>1 ? t(`GPU 监测面板 · 共 ${n} 张卡`,`GPU Monitor · ${n} cards`): t("GPU 监测面板","GPU Monitor");
-  if(n===0){ box.style.display="none"; box.innerHTML=""; return; }
+  if(n===0){ renderGpuUnavailable(latestGpuReason); return; }
   box.style.display="grid";
   if(selectedGpuIdx>n-1) selectedGpuIdx=n-1;
   box.innerHTML = latestGpus.map((g,i)=>{
@@ -2025,9 +2067,16 @@ document.getElementById("btnResetMeter").addEventListener("click",async()=>{
   else setMsg(t("清除失败","Clear failed"),false);
 });
 document.getElementById("btnResetAll").addEventListener("click",async()=>{
-  if(!confirm(t("确定清除全部历史记录（能耗 / 电费 / 每日明细）？电价保留。","Clear all history (energy / cost / daily breakdown)? Electricity price is kept."))) return;
+  if(!confirm(t("确定清除全部历史？将删除 history.db 中的全部时序数据（历史曲线不可恢复），并清零累计能耗与电费 / 每日明细。电价保留。此操作不可撤销。",
+                 "Clear ALL history? This deletes every time-series sample in history.db (charts cannot be restored) and resets cumulative energy, cost and the daily breakdown. The electricity price is kept. This cannot be undone."))) return;
   const r=await postJSON("/api/settings/reset_all",{});
-  if(r&&r.ok){ setMsg(t("已清除全部历史记录","All history cleared"),true); renderSettings(); }
+  if(r&&r.ok){
+    setMsg(r.history_cleared===false
+      ? t("已清零计量，但历史库清理失败（请停止服务后手动删除 history.db）","Metering cleared, but the history database could not be cleared (stop the service and delete history.db manually)")
+      : t("已清除全部历史记录与累计能耗","Cleared all history and cumulative energy"), r.history_cleared!==false);
+    renderSettings();
+    if(typeof loadHistory==="function") loadHistory();
+  }
   else setMsg(t("清除失败","Clear failed"),false);
 });
 document.getElementById("btnExport").addEventListener("click",function(){
@@ -2054,9 +2103,14 @@ async function tick(){
     if(gj&&gj.gpus){
       latestGpus=gj.gpus;
       latestCluster=gj.cluster||null;
+      latestGpuReason=gj.gpu_unavailable_reason||null;
       buildGpuCards();
       const gi=Math.min(selectedGpuIdx, gj.gpus.length-1);
       if(gj.gpus[gi]){ latestGpu=gj.gpus[gi]; renderGpu(latestGpu); }
+    } else if(!gj && !cj && !mj){
+      // 三个接口全部拿不到: 服务未就绪 / 端口不对 / 服务已停止
+      setStatus("err");
+      renderGpuUnavailable({code:"service_unreachable"});
     }
     if(cj) renderCpu(cj);
     if(mj) renderMem(mj);
@@ -2067,9 +2121,20 @@ async function tick(){
     applyTranslations();
   }catch(e){ setStatus("err",t("连接失败: {{e}}","Connection failed: {{e}}",{e:e.message})); }
 }
-function setStatus(type){
+function setStatus(type,text){
   const dot=document.getElementById("dot");
   dot.className="status-dot"+(type==="ok"?"":type==="warn"?" warn":" err");
+  // 旧实现只声明了一个形参, 调用处传的第二个参数(错误详情)被直接丢弃,
+  // 导致连接失败时用户看不到任何原因。这里补上: 把详情放到状态点的 title,
+  // 并在出错时直接写到 GPU 页副标题, 保证用户能看见。
+  const tip=document.getElementById("connTip");
+  if(text){
+    dot.title=text;
+    if(tip){ tip.textContent=text; tip.style.color="var(--red)"; tip.style.display=""; }
+  } else {
+    dot.title="";
+    if(tip){ tip.textContent=""; tip.style.display="none"; }
+  }
 }
 function clock(){ document.getElementById("clock").textContent=new Date().toLocaleTimeString(locale(),{hour12:false}); }
 setInterval(clock,1000); clock();

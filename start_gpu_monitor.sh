@@ -19,21 +19,29 @@ else
 fi
 
 HOST=127.0.0.1
-PORT=8080
+# Port: defaults to 8080, override with the GPU_MONITOR_PORT env var.
+# The service writes the port it actually bound to into monitor.port, so if
+# 8080 is taken it moves to 8081 and every script (plus the watchdog) follows.
+PORT="${GPU_MONITOR_PORT:-8080}"
+[ -f monitor.port ] && PORT="$(cat monitor.port)"
 
 # Skip launching main if already running
 if curl -s -m 3 "http://${HOST}:${PORT}/api/settings" >/dev/null 2>&1; then
   echo "[GPU Monitor] Main service already running: http://${HOST}:${PORT}"
 else
+  # Drop a stale port file so we never health-check a port nobody listens on
+  rm -f monitor.port
   echo "[GPU Monitor] Starting service (${PY})..."
   nohup "$PY" gpu_monitor.py --port "$PORT" --interval 0.5 \
       >> server.log 2>> server_err.log &
   echo $! > monitor.pid
 
-  # Wait up to ~10s for the service to come up
+  # Wait up to ~15s. Re-read monitor.port each round: the service may have
+  # fallen back to the next free port.
   ok=0
-  for i in $(seq 1 10); do
+  for i in $(seq 1 15); do
     sleep 1
+    [ -f monitor.port ] && PORT="$(cat monitor.port)"
     if curl -s -m 2 "http://${HOST}:${PORT}/api/settings" >/dev/null 2>&1; then
       ok=1; break
     fi

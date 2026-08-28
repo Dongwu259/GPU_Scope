@@ -1,6 +1,44 @@
 # 更新日志 (Changelog)
 
-本项目遵循「功能累加」式记录（暂未采用严格 SemVer）。
+本项目遵循「功能累加」式记录（暂未采用严格 SemVer）。版本号以 `gpu_monitor.py` 的 `__version__` 为准。
+
+## 0.1.6 — 审查修复（P0 缺陷 + 文档可信度）
+
+- **修复 Windows 开机自启完全失效（P0）**：原实现把 `start_gpu_monitor.bat` 复制到启动文件夹，但源脚本用 `%~dp0` 定位自身目录，副本会 `cd` 到**启动文件夹**再去找 `gpu_monitor.py`，必然失败；而设置页因只检测文件存在仍显示"已开启"，属静默失效。现改为**生成写死项目绝对路径的启动器**（主服务 + watchdog），并用系统 ANSI 编码写入以兼容含非 ASCII 的项目路径。
+- **修复无 GPU / 缺依赖时前端零提示（P0）**：此前 GPU 页会永久停在"正在连接 NVML …"。后端 `/api/metrics` 在 GPU 数据为空时新增 `gpu_unavailable_reason`（`pynvml_missing` / `nvml_driver` / `nvml_runtime` / `no_gpu` / `unknown` + 原始错误），前端渲染对应的中英文降级提示。
+- **修复陈旧 `monitor.pid` 可能误杀无关进程（P0）**：Windows 的 start 脚本此前不写 PID 文件（只有 watchdog 重启时才写），stop 时 watchdog 会按可能是几天前的 PID 直接 `TerminateProcess`，PID 被系统复用即误杀。现由主服务启动时自行写入 `monitor.pid`，watchdog 在终止前**校验该进程命令行确实包含 `gpu_monitor.py`**；无法确认则不杀（stop 仍有 `/api/shutdown` 与按端口兜底）。
+- **补 Linux 跨平台自动化测试（P0，文档可信度）**：0.1.5 曾声明"Linux 分支单元测试全部通过"，但仓库中并无此类测试，验证不可复现。新增 `tests/test_crossplatform.py`（模拟 `/proc/cpuinfo` 双路与 aarch64、hwmon 温度、RAPL 功率差分的负增量 / 计数器回绕 / 时钟回拨 / 无权限四档降级）并接入 CI。
+- **修复「平均功率(自监控启动)」恒为 N/A**：能耗基线只在 `__init__` 取一次，启动瞬间 NVML 未就绪就会取到 `None` 且永不自愈（本机连续运行 22 小时的实例仍在显示 N/A）。现增加基线自愈（首次拿到有效读数时补设），并处理驱动重启 / 计数器回绕导致读数倒退的情况（重置基线，避免显示负功率）。
+- **修复 ARM Linux（aarch64）核心数塌陷为 1**：`/proc/cpuinfo` 不提供 `physical id` / `core id`，原实现所有逻辑核会塌缩成同一个 key。现退化为用 `processor` 编号作核心标识；顺带修正 cpufreq 路径使用真实 processor 编号（此前用 `range(threads)`，多路机器会读到第一路的频率）。
+- **修复 `reset_all` 名不副实**：此前它等价于 `reset_meter`，完全不动 `history.db`。现真正清空时序样本（`DELETE` + `VACUUM`），前端确认文案同步更新，清除后自动刷新历史页。
+- **安全加固**：
+  - **CSRF**：写接口增加 `Origin` 校验，阻断恶意网页以表单（`text/plain` 简单请求）跨站触发 `/api/shutdown`、`/api/settings/reset_meter`。不带 `Origin` 的客户端（curl / 启停脚本）与携带有效令牌的请求不受影响。
+  - **令牌不再无条件下发**：默认绑定回环时**不注入** `__API_TOKEN__`（本地请求本就免鉴权）；仅 `--host 0.0.0.0` 对外暴露时才注入。
+  - **XSS**：前端新增 `esc()`，进程名 / 网卡名 / 磁盘名 / 挂载点 / IP 在插入 `innerHTML` 前统一转义。
+- **偏好设置校验**：新增 `Prefs.LIMITS` / `Prefs.ENUMS` —— 采样间隔、历史间隔、保留天数、刷新频率、告警阈值均钳制到合理范围；`theme` / 温度单位 / 功率单位非法值回退默认；布尔字段不再把字符串 `"false"` 判为 `True`（原先 `bool("false") == True`）。
+- **历史库性能与并发**：`prune()` 从「每 5 秒全表扫描」改为「每小时一次」；SQLite 启用 WAL 并为所有操作加 `RLock`，消除读写并发抛 `database is locked` 导致历史图表偶发空白的问题；新增 `History.clear()`。
+- **运维与体验**：watchdog 新增 20 秒启动宽限期（此前主服务冷启动稍慢就会被判定死亡并重复拉起）；LHM 探测失败改为指数退避（上限 5 分钟，此前 LHM 未安装时每 2 秒 spawn 一个 PowerShell 空转）；`status` / `stop` 两个 .bat 补 `pause`（双击不再一闪而过）；`requirements.txt` 与 `pyproject.toml` 给 `nvidia-ml-py` 加 `<14` 上界并补 `[tool.setuptools] py-modules`；更正 `load_percent` 注释（非 Windows 恒为 `N/A`，早期注释声称的"用 psutil percent"从未实现）。
+- **文档修正**：删除 README 中不存在的 `POST /api/settings`；把"Linux 已通过单元测试"改为准确的"仅有代码级自动化测试、未实机验证"；路线图补全已实现项与待办项；安全说明补充 **GET 接口无鉴权**与令牌注入条件；架构小节补充 `monitor.pid` / `stop.flag` / `watchdog.lock`。
+- **版本号统一**：`CHANGELOG` / `pyproject.toml` / HTTP `Server` 头 / 前端「关于」卡片统一由 `gpu_monitor.py` 的 `__version__` 驱动（此前四处不一致：0.1.5 / 0.1.0 / `GPUMonitor/1.3` / 0.1.0；前端版本号现由服务端注入 `__VERSION__`）。
+- **修复 stop.flag 残留导致看门狗静默失效**：此前只按"文件是否存在"判断停止信号，一旦 flag 因故残留（stop 时 watchdog 未运行、或删除失败），下次 start 拉起 watchdog 后第一轮就会命中它，立刻杀掉刚启动的主服务并退出 —— 表现为"服务起来了但没有任何守护"。现改为**按文件 mtime 判断新旧**（早于本进程启动时间的 flag 视为旧信号并忽略），删除失败也不会误触发。
+- **watchdog.py 可测试性重构**：单实例检查与主循环从模块级移入 `main()`（此前 `import watchdog` 会直接 `sys.exit(0)`，模块无法被复用或测试），并新增 `acquire_lock` / `release_lock` / `stopflag_armed` 等可独立调用的函数。
+- **Windows 开机自启启动器编码修正**：用 `GetACP()` 取系统 ANSI 代码页（中文 Windows = cp936）写入 .bat，而不是 `locale.getpreferredencoding()`（Python 在 UTF-8 模式下会返回 utf-8，与 cmd 解析 .bat 的代码页不一致，中文项目路径会写成乱码）。
+- `.gitignore` 补充 `stop.flag`、`monitor.port`（守护进程/运行时状态，此前未忽略）。
+
+### 0.1.6 — 第二轮：健壮性、性能与一致性（P2 全清）
+
+- **修复两个主服务实例能同时启动（本次实测发现）**：Windows 的 `SO_REUSEADDR` 语义与 POSIX 不同 —— 它允许**两个进程绑定同一个端口**，因此第二个实例的 `bind()` 不会失败，两者会静默共存（本机实测 `pid 33408` 与 `pid 6340` 同时 `LISTEN` 8080）。后果是双份 NVML 轮询、双份历史写入，且 `meter.json` 由两者互相覆盖导致能耗增量丢失。现 `MonitorHTTPServer` 在 Windows 上关闭 `SO_REUSEADDR` 并启用 `SO_EXCLUSIVEADDRUSE`（POSIX 保留 `SO_REUSEADDR` 以便快速重启），另加**显式单实例检测**：`/api/settings` 返回 `pid`，启动时若发现该端口上已有本服务实例则打印提示并退出。检测必须早于写 `monitor.pid`，否则重复实例会先篡改 PID 文件使检测失效。
+- **端口冲突自动避让 + 单一真源**：端口此前硬编码在 `bat` / `sh` / `watchdog.py` 三处且与同机其他 8080 服务冲突时无任何提示。现在主服务绑定失败（仅 `EADDRINUSE` / `WSAEADDRINUSE`）时向上探测最多 10 个端口，实际端口写入 `monitor.port`；watchdog 与启停脚本一律从该文件读取（环境变量 `GPU_MONITOR_PORT` 可覆盖，仅在该文件缺失时生效）。非"端口被占"的绑定错误（权限、非法地址）照旧抛出，不会被避让逻辑掩盖。
+- **测量时长改用单调时钟**：RAPL 功率差分、网络/磁盘速率差分、CPU 能耗累加、`prune` 节流此前都用 `time.time()`，NTP 时钟回拨会让整段数据被丢弃。现统一改用 `time.monotonic()`；落盘时间戳（`history.db` / `meter.json` / `first_seen`）保持墙钟语义不变。
+- **修复中文 Windows 上 WMI 返回乱码**：`_wmi_json` 用 UTF-8 解码 PowerShell 输出，而 PowerShell 默认按系统 OEM 代码页（cp936）输出，中文 CPU 型号 / 内存品牌会变成乱码。现在脚本前强制设置 `[Console]::OutputEncoding`（实测：修复前 `锟斤拷` 式乱码，修复后完整）。
+- **提交内存负载不再依赖子进程**：该指标原先每 2 秒 spawn 一个 PowerShell 读取性能计数器，现 Windows 改用 `kernel32.GlobalMemoryStatusEx`（与任务管理器"已提交 X/Y"同源，实测与计数器读数**完全一致**），Linux 用 `/proc/meminfo` 的 `Committed_AS / CommitLimit`；macOS 无等价概念，保持 `N/A` 不伪造。
+- **Linux 温度增加 thermal_zone 回退**：hwmon 白名单改为子串匹配，且未命中时回退 `/sys/class/thermal/thermal_zone*/temp`（树莓派等 ARM 平台此前完全没有温度）。hwmon 命中时仍优先，不把 GPU / 电池分区温度冒充成 CPU 温度。
+- **减少 Windows 子进程开销**：每进程显存的 PDH 查询加 5 秒 TTL 缓存，且上一轮为空时跳过一轮（注意"只跳过一轮"，否则会永久自锁）。实测主服务拉起 PowerShell 的频率从 **1.0 个/秒降至 0.187 个/秒（-83%）**；完全根治需要改用 ctypes 直调 PDH，留作后续。
+- **watchdog 文件句柄泄漏**：`launch()` 每次重启主服务都 `open()` 两个日志文件且不关闭，长期运行会累积泄漏（Windows 默认 fd 上限 512）。现改为显式关闭父进程侧句柄。
+- **命名统一**：对外产品名统一为 **GPU Monitor**（前端"关于"卡片、桌面通知标题、开机启动项文件名、systemd 单元描述、API 的 `tool` 字段此前混用 "GPU_Scope"）。GitHub 仓库地址 `GPU_Scope` 不变 —— 那是仓库名，不是产品名。
+- **工程卫生**：清理垃圾文件 `server_8090.log` / `lhm_probe.txt`；`nul` 因是 Windows 保留设备名无法用常规方式删除，已在 CONTRIBUTING 说明成因与手动清除方法，并提示"勿在 Git Bash 下使用 `> nul`"。CONTRIBUTING 另补充第二套测试的使用方式与端口约定。
+- 排查确认：**此前观察到的"孤立 pythonw 进程"（pid 13136，运行 32 小时）属于另一个项目**（`katago_control_agent.py`），与本服务无关。
+- 测试：`tests/test_crossplatform.py` 由 68 项扩至 **81 项**（新增端口与单实例、提交内存负载、Linux 温度回退三组）。
 
 ## 0.1.5 — 跨平台骨架 + Linux 后端（Windows 全功能不变）
 
@@ -15,7 +53,7 @@
 - **Linux 部署脚本**：新增 `start/stop/status_gpu_monitor.sh`（nohup 后台 + watchdog，纯 ASCII）。
 - **健壮性**：`_guess_tdp` 在 psutil 缺失时不再崩溃（`psutil.cpu_count` 判空）。
 - **macOS**：基础指标（psutil）可用，Apple Silicon GPU/功耗/温度后端待后续版本（界面降级提示）。
-- 验证：Linux 分支单元测试（模拟 `/proc/cpuinfo` 双路解析、平台守卫、systemd 自启）全部通过；Windows 测试套件回归全绿。Linux 实机验证待用户服务器部署。
+- 验证：Linux 分支**当时仅以临时脚本验证**（模拟 `/proc/cpuinfo` 双路解析等），未落入仓库、无法复现；对应自动化测试已在 **0.1.6** 补齐（`tests/test_crossplatform.py`）。Windows 测试套件回归全绿。Linux 实机验证待用户服务器部署。
 
 ## 0.1.4 — 估算值标记与验证边界声明
 
