@@ -1362,7 +1362,7 @@ function renderGpu(g){
   document.getElementById("gpuSub").textContent=t(
     '选中 GPU {{i}} · 驱动 {{drv}} · CUDA {{cuda}} · {{arch}} · {{cc}} CUDA 核 · {{tc}} Tensor 核',
     'Selected GPU {{i}} · Driver {{drv}} · CUDA {{cuda}} · {{arch}} · {{cc}} CUDA cores · {{tc}} Tensor cores',
-    {i:selectedGpuIdx, drv:g.driver, cuda:g.cuda, arch:g.spec.arch, cc:g.spec.cuda_cores, tc:g.spec.tensor_cores});
+    {i:selectedGpuIdx, drv:g.driver, cuda:g.cuda, arch:g.spec.arch + (g.spec.guessed ? " (估算)" : ""), cc:g.spec.cuda_cores, tc:g.spec.tensor_cores});
 
   document.getElementById("aiFlops").textContent=fmt(curFlops,1);
   const cumH100 = g.system ? g.system.gpu_h100_hours_cum : null;
@@ -1389,7 +1389,7 @@ function renderGpu(g){
   document.getElementById("clkSm").textContent=g.clocks.sm_mhz||"--";
   document.getElementById("clkMem").textContent=g.clocks.mem_mhz||"--";
   document.getElementById("fan").textContent=g.fan_percent!=null?g.fan_percent:"--";
-  document.getElementById("arch").textContent=g.spec.arch;
+  document.getElementById("arch").textContent=g.spec.arch + (g.spec.guessed ? " (估算)" : "");
 
   document.getElementById("fanRpm").textContent=g.fan_rpm!=null?(g.fan_rpm+" RPM"):"--";
   document.getElementById("cmode").textContent=g.system.compute_mode||"--";

@@ -25,6 +25,7 @@ import argparse
 import ctypes
 import json
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -114,49 +115,227 @@ def _load_nvml():
 #   FP8 张量稠密 ≈ 8×FP32(=FP16稀疏), FP8 张量稀疏 ≈ 16×FP32,
 #   FP4 张量稠密 ≈ 16×FP32(=FP8稀疏), FP4 张量稀疏 ≈ 32×FP32 (=AI TOPS)。
 # A100(GA100) 张量单元远强于着色器, 故其 FP16 张量稠密=312 (≠4×FP32), 单独给定。
+# ---------------------------------------------------------------------------
+# 规格构建辅助函数
+# ---------------------------------------------------------------------------
+def _nv(arch, cuda_cores, tensor_cores, mem_gib, bw_gbps, boost_ghz,
+        fp8=False, fp4=False, has_tensor=True):
+    """由 CUDA 核数 + 加速频率推算 NVIDIA 各精度峰值 (TFLOPS)。
+    fp32 = CC*2*boost/1e3; fp16(着色器)=2×fp32; Tensor 稠密=4×fp32(无 Tensor 时退化为 fp16 着色器);
+    fp8=8×fp32, fp4=16×fp32 (按架构开关)。数值与官方 datasheet 一致(含已收录的 5 张卡)。
+    """
+    fp32 = cuda_cores * 2 * boost_ghz / 1e3
+    fp16 = fp32 * 2
+    d = fp32 * 4 if has_tensor else fp16
+    s = d * 2
+    f8d = fp32 * 8 if fp8 else 0.0
+    f8s = f8d * 2
+    f4d = fp32 * 16 if fp4 else 0.0
+    f4s = f4d * 2
+    return {
+        "arch": arch, "cuda_cores": cuda_cores, "tensor_cores": tensor_cores,
+        "memory_GiB": mem_gib, "bandwidth_GBps": bw_gbps, "boost_clock_ghz": boost_ghz,
+        "fp32_tflops": round(fp32, 1), "fp16_tflops": round(fp16, 1),
+        "tensor_fp16_dense_tflops": round(d, 1), "tensor_fp16_sparse_tflops": round(s, 1),
+        "tensor_fp8_dense_tflops": round(f8d, 1), "tensor_fp8_sparse_tflops": round(f8s, 1),
+        "tensor_fp4_dense_tflops": round(f4d, 1), "tensor_fp4_sparse_tflops": round(f4s, 1),
+    }
+
+
+def _dc(arch, cc, tc, mem, bw, boost, fp16_tc_dense, fp8=True):
+    """数据中心卡: 直接给定 FP16 Tensor 稠密峰值, 其余按通用关系推导
+    (fp32=CC*2*boost/1e3; fp16=2×fp32; fp8 稠密≈2×fp16-tc-稠密;  Blackwell 之前无 fp4)。"""
+    fp32 = cc * 2 * boost / 1e3
+    fp16 = fp32 * 2
+    d = fp16_tc_dense
+    s = d * 2
+    f8d = d * 2 if fp8 else 0.0
+    f8s = f8d * 2
+    return {
+        "arch": arch, "cuda_cores": cc, "tensor_cores": tc,
+        "memory_GiB": mem, "bandwidth_GBps": bw, "boost_clock_ghz": boost,
+        "fp32_tflops": round(fp32, 1), "fp16_tflops": round(fp16, 1),
+        "tensor_fp16_dense_tflops": round(d, 1), "tensor_fp16_sparse_tflops": round(s, 1),
+        "tensor_fp8_dense_tflops": round(f8d, 1), "tensor_fp8_sparse_tflops": round(f8s, 1),
+        "tensor_fp4_dense_tflops": 0.0, "tensor_fp4_sparse_tflops": 0.0,
+    }
+
+
+def _amd(arch, cc, mem, bw, boost, matrix_mult=1.0, fp8=False):
+    """AMD RDNA: fp32 = SP×4×boost(dual-issue); fp16=2×fp32; 矩阵稠密≈matrix_mult×fp16 着色器。
+    注: AMD 矩阵/AI 吞吐为估算值(消费卡无 NVIDIA 式独立 Tensor 核, 用着色器 fp16 近似)。"""
+    fp32 = cc * 4 * boost / 1e3
+    fp16 = fp32 * 2
+    d = fp16 * matrix_mult
+    s = d * 2
+    f8d = fp16 * 2 if fp8 else 0.0
+    f8s = f8d * 2
+    return {
+        "arch": arch, "cuda_cores": cc, "tensor_cores": 0,
+        "memory_GiB": mem, "bandwidth_GBps": bw, "boost_clock_ghz": boost,
+        "fp32_tflops": round(fp32, 1), "fp16_tflops": round(fp16, 1),
+        "tensor_fp16_dense_tflops": round(d, 1), "tensor_fp16_sparse_tflops": round(s, 1),
+        "tensor_fp8_dense_tflops": round(f8d, 1), "tensor_fp8_sparse_tflops": round(f8s, 1),
+        "tensor_fp4_dense_tflops": 0.0, "tensor_fp4_sparse_tflops": 0.0,
+    }
+
+
+def _intel(arch, cc, mem, bw, boost, matrix_mult=2.0, fp8=False):
+    """Intel Arc (Xe): fp32 = SP×2×boost; fp16=2×fp32; XMX 矩阵稠密≈matrix_mult×fp16 着色器。"""
+    fp32 = cc * 2 * boost / 1e3
+    fp16 = fp32 * 2
+    d = fp16 * matrix_mult
+    s = d * 2
+    f8d = fp16 * 2 if fp8 else 0.0
+    f8s = f8d * 2
+    return {
+        "arch": arch, "cuda_cores": cc, "tensor_cores": 0,
+        "memory_GiB": mem, "bandwidth_GBps": bw, "boost_clock_ghz": boost,
+        "fp32_tflops": round(fp32, 1), "fp16_tflops": round(fp16, 1),
+        "tensor_fp16_dense_tflops": round(d, 1), "tensor_fp16_sparse_tflops": round(s, 1),
+        "tensor_fp8_dense_tflops": round(f8d, 1), "tensor_fp8_sparse_tflops": round(f8s, 1),
+        "tensor_fp4_dense_tflops": 0.0, "tensor_fp4_sparse_tflops": 0.0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# GPU 规格数据库 (峰值理论吞吐, 用于换算等价 FLOPS)
+# ---------------------------------------------------------------------------
+# 峰值理论吞吐 (TFLOPS), 数据来自 NVIDIA / AMD / Intel 官方 datasheet 或同代近似。
+# 说明: Blackwell 消费卡 NVIDIA 营销的 "AI TOPS" = FP4 稀疏; 各精度档位关系:
+#   FP16/BF16 张量稠密 ≈ 4×FP32,  FP16 张量稀疏(2:4) ≈ 8×FP32,
+#   FP8 张量稠密 ≈ 8×FP32(=FP16稀疏), FP8 张量稀疏 ≈ 16×FP32,
+#   FP4 张量稠密 ≈ 16×FP32(=FP8稀疏), FP4 张量稀疏 ≈ 32×FP32 (=AI TOPS)。
+# A100(GA100)/H100(GH100) 张量单元远强于着色器, 其 FP16 张量稠密单独给定(≠4×FP32)。
+# 消费 NVIDIA 卡的 Tensor 稠密严格 4×FP32; AMD/Intel 为着色器级 fp16 近似(估算)。
 GPU_SPECS = {
-    "NVIDIA GeForce RTX 5080": {
-        "arch": "Blackwell (GB203)", "cuda_cores": 10752, "tensor_cores": 336,
-        "memory_GiB": 16, "bandwidth_GBps": 960, "boost_clock_ghz": 2.62,
-        "fp32_tflops": 56.3, "fp16_tflops": 112.6,
-        "tensor_fp16_dense_tflops": 225.1, "tensor_fp16_sparse_tflops": 450.2,
-        "tensor_fp8_dense_tflops": 450.2, "tensor_fp8_sparse_tflops": 900.4,
-        "tensor_fp4_dense_tflops": 900.4, "tensor_fp4_sparse_tflops": 1800.8,
-    },
-    "NVIDIA GeForce RTX 5090": {
-        "arch": "Blackwell (GB202)", "cuda_cores": 21760, "tensor_cores": 680,
-        "memory_GiB": 32, "bandwidth_GBps": 1792, "boost_clock_ghz": 2.41,
-        "fp32_tflops": 104.8, "fp16_tflops": 209.6,
-        "tensor_fp16_dense_tflops": 419.1, "tensor_fp16_sparse_tflops": 838.2,
-        "tensor_fp8_dense_tflops": 838.2, "tensor_fp8_sparse_tflops": 1676.4,
-        "tensor_fp4_dense_tflops": 1676.4, "tensor_fp4_sparse_tflops": 3352.8,
-    },
-    "NVIDIA GeForce RTX 4090": {
-        "arch": "Ada Lovelace (AD102)", "cuda_cores": 16384, "tensor_cores": 512,
-        "memory_GiB": 24, "bandwidth_GBps": 1008, "boost_clock_ghz": 2.52,
-        "fp32_tflops": 82.6, "fp16_tflops": 165.2,
-        "tensor_fp16_dense_tflops": 330.3, "tensor_fp16_sparse_tflops": 660.6,
-        "tensor_fp8_dense_tflops": 660.6, "tensor_fp8_sparse_tflops": 1321.0,
-        "tensor_fp4_dense_tflops": 1321.0, "tensor_fp4_sparse_tflops": 2642.0,
-    },
-    "NVIDIA GeForce RTX 3090": {
-        "arch": "Ampere (GA102)", "cuda_cores": 10496, "tensor_cores": 328,
-        "memory_GiB": 24, "bandwidth_GBps": 936, "boost_clock_ghz": 1.70,
-        "fp32_tflops": 35.6, "fp16_tflops": 71.2,
-        "tensor_fp16_dense_tflops": 142.4, "tensor_fp16_sparse_tflops": 284.8,
-        "tensor_fp8_dense_tflops": 284.8, "tensor_fp8_sparse_tflops": 569.6,
-        "tensor_fp4_dense_tflops": 569.6, "tensor_fp4_sparse_tflops": 1139.2,
-    },
-    "NVIDIA A100-SXM4-80GB": {
-        "arch": "Ampere (GA100)", "cuda_cores": 6912, "tensor_cores": 432,
-        "memory_GiB": 80, "bandwidth_GBps": 2039, "boost_clock_ghz": 1.41,
-        "fp32_tflops": 19.5, "fp16_tflops": 39.0,
-        "tensor_fp16_dense_tflops": 312.0, "tensor_fp16_sparse_tflops": 624.0,
-        "tensor_fp8_dense_tflops": 624.0, "tensor_fp8_sparse_tflops": 1248.0,
-        "tensor_fp4_dense_tflops": 1248.0, "tensor_fp4_sparse_tflops": 2496.0,
-    },
+    # ---- NVIDIA GeForce RTX 50 (Blackwell) ----
+    "NVIDIA GeForce RTX 5090": _nv("Blackwell (GB202)", 21760, 680, 32, 1792, 2.41, fp8=True, fp4=True),
+    "NVIDIA GeForce RTX 5080": _nv("Blackwell (GB203)", 10752, 336, 16, 960, 2.62, fp8=True, fp4=True),
+    "NVIDIA GeForce RTX 5070 Ti": _nv("Blackwell (GB203)", 8960, 280, 16, 896, 2.45, fp8=True, fp4=True),
+    "NVIDIA GeForce RTX 5070": _nv("Blackwell (GB205)", 6144, 192, 12, 672, 2.51, fp8=True, fp4=True),
+    "NVIDIA GeForce RTX 5060 Ti": _nv("Blackwell (GB206)", 4608, 144, 16, 448, 2.57, fp8=True, fp4=True),
+    "NVIDIA GeForce RTX 5060": _nv("Blackwell (GB206)", 3840, 120, 8, 448, 2.50, fp8=True, fp4=True),
+    # ---- NVIDIA GeForce RTX 40 (Ada Lovelace) ----
+    "NVIDIA GeForce RTX 4090": _nv("Ada Lovelace (AD102)", 16384, 512, 24, 1008, 2.52, fp8=True),
+    "NVIDIA GeForce RTX 4080 Super": _nv("Ada Lovelace (AD103)", 10240, 320, 16, 736, 2.55, fp8=True),
+    "NVIDIA GeForce RTX 4080": _nv("Ada Lovelace (AD103)", 9728, 304, 16, 717, 2.51, fp8=True),
+    "NVIDIA GeForce RTX 4070 Ti Super": _nv("Ada Lovelace (AD103)", 8448, 264, 16, 672, 2.61, fp8=True),
+    "NVIDIA GeForce RTX 4070 Ti": _nv("Ada Lovelace (AD104)", 7680, 240, 12, 504, 2.61, fp8=True),
+    "NVIDIA GeForce RTX 4070 Super": _nv("Ada Lovelace (AD104)", 7168, 224, 12, 504, 2.48, fp8=True),
+    "NVIDIA GeForce RTX 4070": _nv("Ada Lovelace (AD104)", 5888, 184, 12, 504, 2.48, fp8=True),
+    "NVIDIA GeForce RTX 4060 Ti": _nv("Ada Lovelace (AD106)", 4352, 136, 16, 288, 2.54, fp8=True),
+    "NVIDIA GeForce RTX 4060": _nv("Ada Lovelace (AD107)", 3072, 96, 8, 272, 2.46, fp8=True),
+    # ---- NVIDIA GeForce RTX 30 (Ampere) ----
+    "NVIDIA GeForce RTX 3090 Ti": _nv("Ampere (GA102)", 10752, 336, 24, 1008, 1.86),
+    "NVIDIA GeForce RTX 3090": _nv("Ampere (GA102)", 10496, 328, 24, 936, 1.70),
+    "NVIDIA GeForce RTX 3080 Ti": _nv("Ampere (GA102)", 10240, 320, 12, 912, 1.67),
+    "NVIDIA GeForce RTX 3080": _nv("Ampere (GA102)", 8704, 272, 12, 760, 1.71),
+    "NVIDIA GeForce RTX 3070 Ti": _nv("Ampere (GA104)", 6144, 192, 8, 608, 1.77),
+    "NVIDIA GeForce RTX 3070": _nv("Ampere (GA104)", 5888, 184, 8, 448, 1.73),
+    "NVIDIA GeForce RTX 3060 Ti": _nv("Ampere (GA104)", 4864, 152, 8, 448, 1.67),
+    "NVIDIA GeForce RTX 3060": _nv("Ampere (GA106)", 3584, 112, 12, 360, 1.78),
+    # ---- NVIDIA GeForce RTX 20 (Turing) ----
+    "NVIDIA GeForce RTX 2080 Ti": _nv("Turing (TU102)", 4352, 544, 11, 616, 1.635),
+    "NVIDIA GeForce RTX 2080 Super": _nv("Turing (TU104)", 3072, 384, 8, 495, 1.815),
+    "NVIDIA GeForce RTX 2080": _nv("Turing (TU104)", 2944, 368, 8, 448, 1.71),
+    "NVIDIA GeForce RTX 2070 Super": _nv("Turing (TU104)", 2560, 320, 8, 448, 1.77),
+    "NVIDIA GeForce RTX 2070": _nv("Turing (TU106)", 2304, 288, 8, 448, 1.62),
+    "NVIDIA GeForce RTX 2060 Super": _nv("Turing (TU106)", 2176, 272, 8, 448, 1.65),
+    "NVIDIA GeForce RTX 2060": _nv("Turing (TU106)", 1920, 240, 6, 336, 1.68),
+    # ---- NVIDIA GeForce GTX 16 / 10 (无 Tensor 核) ----
+    "NVIDIA GeForce GTX 1660 Ti": _nv("Turing (TU116)", 1536, 0, 6, 288, 1.77, has_tensor=False),
+    "NVIDIA GeForce GTX 1660 Super": _nv("Turing (TU116)", 1408, 0, 6, 336, 1.785, has_tensor=False),
+    "NVIDIA GeForce GTX 1660": _nv("Turing (TU116)", 1408, 0, 6, 192, 1.785, has_tensor=False),
+    "NVIDIA GeForce GTX 1650 Super": _nv("Turing (TU116)", 1280, 0, 4, 192, 1.725, has_tensor=False),
+    "NVIDIA GeForce GTX 1650": _nv("Turing (TU117)", 896, 0, 4, 128, 1.665, has_tensor=False),
+    "NVIDIA GeForce GTX 1080 Ti": _nv("Pascal (GP102)", 3584, 0, 11, 484, 1.58, has_tensor=False),
+    "NVIDIA GeForce GTX 1080": _nv("Pascal (GP104)", 2560, 0, 8, 320, 1.73, has_tensor=False),
+    "NVIDIA GeForce GTX 1070 Ti": _nv("Pascal (GP104)", 2432, 0, 8, 256, 1.68, has_tensor=False),
+    "NVIDIA GeForce GTX 1070": _nv("Pascal (GP104)", 1920, 0, 8, 256, 1.68, has_tensor=False),
+    "NVIDIA GeForce GTX 1060": _nv("Pascal (GP106)", 1280, 0, 6, 192, 1.708, has_tensor=False),
+    # ---- NVIDIA Titan ----
+    "NVIDIA Titan RTX": _nv("Turing (TU102)", 4608, 576, 24, 672, 1.77),
+    "NVIDIA Titan V": _nv("Volta (GV100)", 5120, 640, 12, 653, 1.455),
+    "NVIDIA Titan Xp": _nv("Pascal (GP102)", 3840, 0, 12, 548, 1.58, has_tensor=False),
+    # ---- NVIDIA 数据中心 / 计算卡 ----
+    "NVIDIA A100-SXM4-80GB": _dc("Ampere (GA100)", 6912, 432, 80, 2039, 1.41, 312.0, fp8=True),
+    "NVIDIA A100-SXM4-40GB": _dc("Ampere (GA100)", 6912, 432, 40, 1555, 1.41, 312.0, fp8=True),
+    "NVIDIA A100-PCIe-40GB": _dc("Ampere (GA100)", 6912, 432, 40, 1555, 1.41, 312.0, fp8=True),
+    "NVIDIA A800-SXM4-80GB": _dc("Ampere (GA100)", 6912, 432, 80, 2039, 1.41, 312.0, fp8=True),
+    "NVIDIA H100-SXM-80GB": _dc("Hopper (GH100)", 16896, 528, 80, 3350, 1.98, 989.0, fp8=True),
+    "NVIDIA H100-PCIe-80GB": _dc("Hopper (GH100)", 16896, 528, 80, 2000, 1.83, 756.0, fp8=True),
+    "NVIDIA H800-SXM-80GB": _dc("Hopper (GH100)", 16896, 528, 80, 3350, 1.98, 989.0, fp8=True),
+    "NVIDIA L40S": _dc("Ada Lovelace (AD102)", 18176, 568, 48, 864, 2.52, 733.0, fp8=True),
+    "NVIDIA L40": _dc("Ada Lovelace (AD102)", 18176, 568, 48, 864, 2.31, 669.0, fp8=True),
+    "NVIDIA L20": _dc("Ada Lovelace (AD102)", 11776, 368, 48, 864, 2.31, 239.0, fp8=True),
+    "NVIDIA L4": _dc("Ada Lovelace (AD104)", 7424, 232, 24, 300, 2.46, 121.0, fp8=True),
+    "NVIDIA A40": _dc("Ampere (GA102)", 10752, 336, 48, 696, 1.74, 149.7, fp8=True),
+    "NVIDIA A30": _dc("Ampere (GA100)", 3584, 224, 24, 933, 1.44, 165.0, fp8=True),
+    "NVIDIA A10": _dc("Ampere (GA102)", 9216, 288, 24, 600, 1.69, 125.0, fp8=True),
+    "NVIDIA A10G": _dc("Ampere (GA102)", 9216, 288, 24, 600, 1.71, 125.0, fp8=True),
+    "NVIDIA A2": _dc("Ampere (GA104)", 3328, 104, 16, 200, 1.77, 47.2, fp8=True),
+    "NVIDIA V100-SXM2-32GB": _dc("Volta (GV100)", 5120, 640, 32, 900, 1.53, 125.0, fp8=False),
+    "NVIDIA V100-PCIe-16GB": _dc("Volta (GV100)", 5120, 640, 16, 900, 1.25, 112.0, fp8=False),
+    "NVIDIA T4": _dc("Turing (TU104)", 2560, 320, 16, 300, 1.59, 65.0, fp8=False),
+    "NVIDIA P100-PCIe-16GB": _dc("Pascal (GP100)", 3584, 0, 16, 732, 1.48, 21.2, fp8=False),
+    # ---- NVIDIA RTX 工作站卡 ----
+    "NVIDIA RTX 6000 Ada": _nv("Ada Lovelace (AD102)", 18176, 568, 48, 960, 2.50, fp8=True),
+    "NVIDIA RTX A6000": _nv("Ampere (GA102)", 10752, 336, 48, 768, 1.80),
+    "NVIDIA RTX A5000": _nv("Ampere (GA102)", 8192, 256, 24, 768, 1.695),
+    "NVIDIA RTX A4000": _nv("Ampere (GA104)", 6144, 192, 16, 448, 1.735),
+    "NVIDIA RTX A2000": _nv("Ampere (GA106)", 3328, 104, 12, 288, 1.62),
+    # ---- AMD Radeon (RDNA, 估算) ----
+    "AMD Radeon RX 7900 XTX": _amd("RDNA3 (Navi 31)", 6144, 24, 960, 2.50),
+    "AMD Radeon RX 7900 XT": _amd("RDNA3 (Navi 31)", 5376, 20, 800, 2.39),
+    "AMD Radeon RX 9070 XT": _amd("RDNA4 (Navi 48)", 4096, 16, 640, 2.97),
+    "AMD Radeon RX 9070": _amd("RDNA4 (Navi 48)", 3584, 16, 640, 2.54),
+    "AMD Radeon RX 7800 XT": _amd("RDNA3 (Navi 32)", 3840, 16, 624, 2.43),
+    "AMD Radeon RX 7700 XT": _amd("RDNA3 (Navi 32)", 3456, 12, 432, 2.54),
+    "AMD Radeon RX 7600": _amd("RDNA3 (Navi 33)", 2048, 8, 288, 2.66),
+    "AMD Radeon RX 9060 XT": _amd("RDNA4 (Navi 44)", 2048, 16, 640, 3.13),
+    "AMD Radeon RX 6950 XT": _amd("RDNA2 (Navi 21)", 5120, 16, 576, 2.31),
+    "AMD Radeon RX 6900 XT": _amd("RDNA2 (Navi 21)", 5120, 16, 512, 2.25),
+    "AMD Radeon RX 6800 XT": _amd("RDNA2 (Navi 21)", 4608, 16, 512, 2.25),
+    "AMD Radeon RX 6800": _amd("RDNA2 (Navi 21)", 3840, 16, 512, 2.10),
+    "AMD Radeon RX 6700 XT": _amd("RDNA2 (Navi 22)", 2560, 12, 384, 2.42),
+    "AMD Radeon RX 6600 XT": _amd("RDNA2 (Navi 23)", 2048, 8, 256, 2.59),
+    "AMD Radeon RX 6600": _amd("RDNA2 (Navi 23)", 1792, 8, 224, 2.49),
+    "AMD Radeon RX 5700 XT": _amd("RDNA (Navi 10)", 2560, 8, 448, 1.90),
+    # ---- AMD CDNA 数据中心 (估算) ----
+    "AMD Instinct MI100": _dc("CDNA1", 7680, 0, 32, 1228, 1.50, 184.6, fp8=False),
+    "AMD Instinct MI250X": _dc("CDNA2", 14080, 0, 128, 3200, 1.70, 766.0, fp8=True),
+    "AMD Instinct MI300X": _dc("CDNA3", 19456, 0, 192, 5300, 2.10, 1043.0, fp8=True),
+    # ---- Intel Arc (估算) ----
+    "Intel Arc A770": _intel("Xe-HPG (Alchemist)", 4096, 16, 512, 2.10),
+    "Intel Arc A750": _intel("Xe-HPG (Alchemist)", 3584, 8, 512, 2.05),
+    "Intel Arc A580": _intel("Xe-HPG (Alchemist)", 3072, 8, 512, 1.70),
+    "Intel Arc A380": _intel("Xe-HPG (Alchemist)", 1024, 6, 192, 2.00),
+    "Intel Arc B580": _intel("Xe2 (Battlemage)", 2560, 12, 456, 2.67, fp8=True),
+    "Intel Arc B570": _intel("Xe2 (Battlemage)", 2048, 10, 380, 2.64, fp8=True),
+    # ---- Apple (估算) ----
+    "Apple M2 GPU": {"arch": "Apple (估算)", "cuda_cores": 0, "tensor_cores": 0, "memory_GiB": 0,
+                     "bandwidth_GBps": 0.0, "boost_clock_ghz": 0.0, "fp32_tflops": 3.6, "fp16_tflops": 7.2,
+                     "tensor_fp16_dense_tflops": 7.2, "tensor_fp16_sparse_tflops": 14.4,
+                     "tensor_fp8_dense_tflops": 0.0, "tensor_fp8_sparse_tflops": 0.0,
+                     "tensor_fp4_dense_tflops": 0.0, "tensor_fp4_sparse_tflops": 0.0},
+    "Apple M3 Max GPU": {"arch": "Apple (估算)", "cuda_cores": 0, "tensor_cores": 0, "memory_GiB": 0,
+                         "bandwidth_GBps": 0.0, "boost_clock_ghz": 0.0, "fp32_tflops": 14.0, "fp16_tflops": 28.0,
+                         "tensor_fp16_dense_tflops": 28.0, "tensor_fp16_sparse_tflops": 56.0,
+                         "tensor_fp8_dense_tflops": 0.0, "tensor_fp8_sparse_tflops": 0.0,
+                         "tensor_fp4_dense_tflops": 0.0, "tensor_fp4_sparse_tflops": 0.0},
 }
 DEFAULT_SPEC = GPU_SPECS["NVIDIA GeForce RTX 5080"]
+
+# 数值字段(供"未知型号按同代已有数据插值估算"使用)
+_SPEC_NUM_FIELDS = [
+    "fp32_tflops", "fp16_tflops",
+    "tensor_fp16_dense_tflops", "tensor_fp16_sparse_tflops",
+    "tensor_fp8_dense_tflops", "tensor_fp8_sparse_tflops",
+    "tensor_fp4_dense_tflops", "tensor_fp4_sparse_tflops",
+    "memory_GiB", "bandwidth_GBps", "boost_clock_ghz",
+]
+
 
 # ---------------------------------------------------------------------------
 # 等效 H100 GPU 小时: 把各型号 GPU 的"利用率 × 时长"折算成 H100 等效算力时长。
@@ -165,28 +344,167 @@ DEFAULT_SPEC = GPU_SPECS["NVIDIA GeForce RTX 5080"]
 # ---------------------------------------------------------------------------
 _H100_TF16_DENSE = 989.0  # H100 FP16 Tensor 稠密峰值 (TFLOPS)
 
-# 规格表未收录的常见数据中心/计算卡, 按名称子串匹配给定相对系数
-_H100_FACTOR_TABLE = {
-    "H100": 1.0, "H800": 1.0, "H20": 0.62, "A100": 0.315, "A800": 0.315,
-    "L40S": 0.30, "L40": 0.24, "A40": 0.18, "A30": 0.13, "A10": 0.10,
-    "A10G": 0.10, "V100": 0.125, "T4": 0.035, "P100": 0.06, "M60": 0.03,
-    "RTX 6000": 0.42, "RTX A6000": 0.22, "RTX A5000": 0.16,
-    "RTX A4000": 0.11, "RTX 5090": 0.4235, "RTX 5080": 0.2276,
-    "RTX 5070": 0.18, "RTX 4090": 0.3338, "RTX 4080": 0.23, "RTX 4070": 0.15,
-    "RTX 4060": 0.10, "RTX 3090": 0.1440, "RTX 3080": 0.10, "RTX 3060": 0.06,
-}
+
+def _norm_key(name):
+    """把 NVML 回报的型号名归一化, 让变体(Laptop / PCIE-40GB / SXM4 / HBM3 等)也能命中规格库。
+    例: 'NVIDIA GeForce RTX 4090 Laptop GPU' -> '4090', 'NVIDIA A100-SXM-80GB' -> 'A100',
+        'NVIDIA H100 80GB HBM3' -> 'H100'。"""
+    s = (name or "").upper()
+    for w in ("NVIDIA", "GEFORCE", "TESLA", "QUADRO", "RADEON", "AMD", "ATI", "INTEL", "ARC", "RTX", "GTX", "RX"):
+        s = s.replace(w, " ")
+    s = re.sub(r"\b\d+\s?GB\b", " ", s)                                  # 显存容量
+    s = re.sub(r"\b(SXM\d*|PCIE|PCI-E|MXM|LAPTOP|MOBILE|NOTEBOOK|MAX-Q|"
+               r"FOUNDERS|EDITION|OC|REV\S*|SHA|HYBRID|HBM\d*|GPU)\b", " ", s)  # 形态/版本后缀
+    s = re.sub(r"[^A-Z0-9]+", " ", s)                                   # 合并连字符等分隔符为空格
+    return s.strip()
+
+
+def _vendor_of(name):
+    s = (name or "").upper()
+    if any(k in s for k in ("NVIDIA", "GEFORCE", "TESLA", "QUADRO", "TITAN",
+                            "RTX", "GTX", "A100", "H100", "L40", "A40", "A30", "A10", "L4", "V100", "T4", "P100")):
+        return "nvidia"
+    if any(k in s for k in ("AMD", "RADEON", "ATI", "RX ", "MI100", "MI200", "MI250", "MI300")):
+        return "amd"
+    if "INTEL" in s or "ARC" in s:
+        return "intel"
+    if "APPLE" in s:
+        return "apple"
+    return "other"
+
+
+def _model_number(name):
+    """从型号名提取可用于同代插值的数字(型号档位)。无数字返回 None。"""
+    if not name:
+        return None
+    s = name.upper()
+    m = re.search(r"(?:RTX|GTX)\s*(\d{3,4})", s)
+    if not m:
+        m = re.search(r"(?:RADEON\s+)?RX\s*(\d{4})", s)
+    if not m:
+        m = re.search(r"\b(?:A|H|L|P|V|T|M)(\d{2,3})\b", s)
+    if not m:
+        m = re.search(r"ARC\s*(?:PRO)?\s*(?:A|B)?\s*(\d{3})", s)
+    return int(m.group(1)) if m else None
+
+
+_SPEC_INDEX = {}
+for _k in GPU_SPECS:
+    _SPEC_INDEX.setdefault(_norm_key(_k), _k)
+
+
+def _interp(points, x):
+    """points: 已排序的 [(x, y), ...]; 在 x 处线性插值, 越界则取端点。"""
+    if not points:
+        return 0.0
+    if x <= points[0][0]:
+        return points[0][1]
+    if x >= points[-1][0]:
+        return points[-1][1]
+    for i in range(1, len(points)):
+        x0, y0 = points[i - 1]
+        x1, y1 = points[i]
+        if x <= x1:
+            if x1 == x0:
+                return y0
+            return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+    return points[-1][1]
+
+
+def _conservative_spec(name, vendor):
+    """型号完全无法解析数字时: 用全库 fp32 中位数作为'典型 GPU'估算, 避免直接套用 5080 高性能参数。"""
+    fps = sorted(v["fp32_tflops"] for v in GPU_SPECS.values())
+    med = fps[len(fps) // 2]
+    if vendor == "nvidia":
+        arch = "NVIDIA (未知型号, 估算)"
+    elif vendor == "amd":
+        arch = "AMD (未知型号, 估算)"
+    elif vendor == "intel":
+        arch = "Intel (未知型号, 估算)"
+    else:
+        arch = "未知架构 (估算)"
+    fp32 = float(med)
+    fp16 = fp32 * 2
+    d = fp32 * 4
+    return {
+        "arch": arch, "cuda_cores": 0, "tensor_cores": 0, "memory_GiB": 0,
+        "bandwidth_GBps": 0.0, "boost_clock_ghz": 0.0,
+        "fp32_tflops": round(fp32, 1), "fp16_tflops": round(fp16, 1),
+        "tensor_fp16_dense_tflops": round(d, 1), "tensor_fp16_sparse_tflops": round(d * 2, 1),
+        "tensor_fp8_dense_tflops": 0.0, "tensor_fp8_sparse_tflops": 0.0,
+        "tensor_fp4_dense_tflops": 0.0, "tensor_fp4_sparse_tflops": 0.0,
+        "guessed": True,
+    }
+
+
+def guess_spec(name):
+    """规格库未收录时的估算: 优先在同代(同厂商同型号档位)已有数据间线性插值;
+    同代样本不足则整体照搬同厂商最接近的一张卡。结果标注 guessed=True。"""
+    vendor = _vendor_of(name)
+    num = _model_number(name)
+    if num is None:
+        return _conservative_spec(name, vendor)
+    pool = [(k, GPU_SPECS[k]) for k in GPU_SPECS if _vendor_of(k) == vendor]
+    if not pool:
+        return _conservative_spec(name, vendor)
+    gen = num // 100
+    same_gen = [(k, v) for k, v in pool if (_model_number(k) or -1) // 100 == gen]
+    distinct_x = sorted(set(_model_number(k) for k, _ in same_gen))
+    if len(distinct_x) >= 2:
+        est = {}
+        for f in _SPEC_NUM_FIELDS:
+            pts = sorted((_model_number(k), v[f]) for k, v in same_gen if _model_number(k) is not None)
+            est[f] = _interp(pts, num)
+        numbered = [(k, v) for k, v in same_gen if _model_number(k) is not None]
+        nearest = min(numbered, key=lambda kv: abs(_model_number(kv[0]) - num))
+        est["arch"] = nearest[1]["arch"]
+        est["cuda_cores"] = 0
+        est["tensor_cores"] = 0
+        est["memory_GiB"] = round(est["memory_GiB"])
+        est["boost_clock_ghz"] = round(est["boost_clock_ghz"], 2)
+        est["guessed"] = True
+        return est
+    # 同代不足 2 个 -> 取同厂商最接近(按型号数字)的一张卡整体照搬, 标注估算
+    numbered = [(k, v) for k, v in pool if _model_number(k) is not None]
+    nearest = min(numbered, key=lambda kv: abs(_model_number(kv[0]) - num)) if numbered else pool[0]
+    s = dict(nearest[1])
+    s["guessed"] = True
+    s["cuda_cores"] = 0
+    s["tensor_cores"] = 0
+    return s
+
+
+def resolve_spec(name):
+    """返回 spec 字典(含 guessed 标记)。精确命中 / 归一化命中返回库值(guessed=False);
+    否则返回估算(guessed=True)。spec 始终含全部字段, 调用方无需再判缺失。"""
+    if not name:
+        s = dict(DEFAULT_SPEC)
+        s["guessed"] = True
+        return s
+    if name in GPU_SPECS:
+        s = dict(GPU_SPECS[name])
+        s["guessed"] = False
+        return s
+    nk = _norm_key(name)
+    if nk and nk in _SPEC_INDEX:
+        s = dict(GPU_SPECS[_SPEC_INDEX[nk]])
+        s["guessed"] = False
+        return s
+    return guess_spec(name)
 
 
 def h100_factor(name):
-    """返回某 GPU 相对 H100 的算力系数 (基于 FP16 Tensor 稠密 TFLOPS)。"""
+    """返回某 GPU 相对 H100 的算力系数 (基于 FP16 Tensor 稠密 TFLOPS)。
+    未知型号: 先尝试按规格库估算其 FP16 Tensor 稠密峰值, 再折算; 完全无法解析则返回保守值。"""
     if not name:
         return 0.1
     if name in GPU_SPECS:
         return max(0.01, GPU_SPECS[name]["tensor_fp16_dense_tflops"] / _H100_TF16_DENSE)
-    for key, f in _H100_FACTOR_TABLE.items():
-        if key in name:
-            return f
-    return 0.1  # 未知型号给保守默认
+    nk = _norm_key(name)
+    if nk and nk in _SPEC_INDEX:
+        return max(0.01, GPU_SPECS[_SPEC_INDEX[nk]]["tensor_fp16_dense_tflops"] / _H100_TF16_DENSE)
+    g = guess_spec(name)
+    return max(0.01, g["tensor_fp16_dense_tflops"] / _H100_TF16_DENSE)
 
 THROTTLE_REASONS = {
     0x1: "GPU 空闲降频", 0x2: "应用自定义时钟设置", 0x4: "软件功率上限 (Power Cap)",
@@ -1004,7 +1322,7 @@ class Monitor:
         _alive = set(proc_pids.keys())
         self._proc_util[idx] = {p: self._proc_util[idx].get(p, {}) for p in _alive}
 
-        spec = GPU_SPECS.get(name, DEFAULT_SPEC)
+        spec = resolve_spec(name)  # 精确/归一化命中库值, 否则按同代数据估算(guessed=True)
         gpu_u = float(util.gpu)
         mem_u = float(util.memory)
         mem_used_mb = mem.used / (1024 * 1024)

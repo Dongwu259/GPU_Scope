@@ -300,13 +300,45 @@ def test_gpu_unavailable_reason():
 def test_h100_factor():
     check("H100 系数为 1.0",
           abs(gm.h100_factor("NVIDIA H100 80GB HBM3") - 1.0) < 1e-9)
+    spec5080 = gm.GPU_SPECS["NVIDIA GeForce RTX 5080"]
     check("RTX 5080 使用规格表精确值",
-          abs(gm.h100_factor("NVIDIA GeForce RTX 5080") - 225.1 / 989.0) < 1e-6,
+          abs(gm.h100_factor("NVIDIA GeForce RTX 5080") -
+              spec5080["tensor_fp16_dense_tflops"] / 989.0) < 1e-9,
           gm.h100_factor("NVIDIA GeForce RTX 5080"))
-    check("未收录型号回落保守值 0.1",
-          gm.h100_factor("Some Unknown Card") == 0.1)
     check("空名称回落保守值 0.1", gm.h100_factor("") == 0.1)
     check("未知型号不返回 0 或负数", gm.h100_factor("???") > 0)
+    # 未收录但可解析型号: 按同代数据估算, 给出合理(非零)且明显不同于 5080 的系数
+    f3050 = gm.h100_factor("NVIDIA GeForce RTX 3050")
+    check("RTX 3050(未收录)按估算给出合理系数", 0 < f3050 < 0.2, f3050)
+    check("RTX 3050(未收录)系数 ≠ 直接套用 5080", abs(f3050 - 225.1 / 989.0) > 1e-3, f3050)
+    check("未知型号不再统一按 5080 折算",
+          abs(gm.h100_factor("NVIDIA GeForce RTX 3050") - gm.h100_factor("NVIDIA GeForce RTX 5080")) > 1e-2)
+
+
+def test_gpu_spec_resolution():
+    # 精确命中库值
+    spec = gm.resolve_spec("NVIDIA GeForce RTX 4090")
+    check("精确命中 guessed=False", spec["guessed"] is False)
+    check("精确命中 cuda_cores=16384", spec["cuda_cores"] == 16384)
+    # NVML 变体名(笔记本 / PCIe 形态)经归一化命中, 不误判为未知
+    spec = gm.resolve_spec("NVIDIA GeForce RTX 4090 Laptop GPU")
+    check("笔记本变体归一化命中 guessed=False", spec["guessed"] is False)
+    spec = gm.resolve_spec("NVIDIA A100-PCIE-40GB")
+    check("A100 PCIe 变体归一化命中 guessed=False", spec["guessed"] is False, spec.get("arch"))
+    # 未收录但可解析 -> 按同代数据估算
+    spec = gm.resolve_spec("NVIDIA GeForce RTX 3050")
+    check("RTX 3050 未收录 -> guessed=True", spec["guessed"] is True)
+    check("RTX 3050 估算 fp32 落在同代区间", 10 < spec["fp32_tflops"] < 50, spec["fp32_tflops"])
+    check("RTX 3050 估算含全部字段",
+          all(k in spec for k in ("fp32_tflops", "tensor_fp16_dense_tflops", "arch", "bandwidth_GBps")))
+    # 完全无法解析 -> 保守估算(库中位数), 仍非零, 且不再套用 5080
+    spec = gm.resolve_spec("Some Weird Card 123")
+    check("无法解析型号 -> guessed=True", spec["guessed"] is True)
+    check("无法解析型号 fp32 为库中位数(非零)", spec["fp32_tflops"] > 0, spec["fp32_tflops"])
+    check("未知型号不回退到 5080 参数", "5080" not in spec["arch"], spec["arch"])
+    # 估算 spec 的 fp16 稠密不应等于 5080 的 225.1
+    check("估算 fp16 稠密 ≠ 5080 的 225.1",
+          abs(spec["tensor_fp16_dense_tflops"] - 225.1) > 1.0, spec["tensor_fp16_dense_tflops"])
 
 
 # ---------------------------------------------------------------------------
@@ -639,6 +671,8 @@ if __name__ == "__main__":
     test_thermal_fallback()
     print("-- 算力系数 --")
     test_h100_factor()
+    print("-- 规格解析与估算 --")
+    test_gpu_spec_resolution()
     print("=========================================")
     print("通过 %d 项" % len(PASSED))
     if KNOWN:
