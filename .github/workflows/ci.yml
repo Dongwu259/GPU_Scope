@@ -16,10 +16,10 @@ jobs:
         python-version: ["3.8", "3.10", "3.12"]
     steps:
       - name: 拉取代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
 
       - name: 配置 Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
 
