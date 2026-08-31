@@ -46,7 +46,7 @@
   .nav-item.active{background:rgba(37,99,235,.22);color:#fff;border-left-color:var(--accent)}
   .nav-item .ico{width:9px;height:9px;border-radius:3px;background:#64748b;flex:0 0 auto}
   .nav-item.active .ico{background:var(--accent)}
-  .nav-item .ico.gpu{background:var(--violet)} .nav-item .ico.cpu{background:var(--accent)} .nav-item .ico.mem{background:var(--cyan)} .nav-item .ico.ov{background:#10b981} .nav-item .ico.st{background:#64748b} .nav-item .ico.hist{background:#0ea5e9}
+  .nav-item .ico.gpu{background:var(--violet)} .nav-item .ico.cpu{background:var(--accent)} .nav-item .ico.mem{background:var(--cyan)} .nav-item .ico.ov{background:#10b981} .nav-item .ico.st{background:#64748b} .nav-item .ico.hist{background:#0ea5e9} .nav-item .ico.sys{background:#8b5cf6}
   th[data-key]{cursor:pointer;user-select:none}
   th[data-key]:hover{color:var(--accent)}
   th.sorted{color:var(--accent)}
@@ -177,6 +177,15 @@
 
   .footer{color:var(--muted);font-size:11.5px;margin-top:18px;text-align:center}
   .page[hidden]{display:none}
+  .sys-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:14px;align-items:start}
+  .sys-card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px}
+  .sys-card-h{font-size:14px;font-weight:700;margin-bottom:10px;color:var(--ink);word-break:break-all}
+  .sys-rows{display:flex;flex-direction:column;gap:5px}
+  .sys-row{display:flex;justify-content:space-between;gap:12px;font-size:13px;padding:3px 0;border-bottom:1px dashed var(--line)}
+  .sys-row:last-child{border-bottom:none}
+  .sys-k{color:var(--muted);flex:0 0 auto;padding-right:8px}
+  .sys-v{font-weight:600;text-align:right;font-variant-numeric:tabular-nums;word-break:break-all}
+  .sys-sub{font-size:12px;font-weight:700;color:var(--violet);margin:9px 0 3px}
 </style>
 </head>
 <body>
@@ -195,6 +204,7 @@
       <a class="nav-item" data-page="gpu"><span class="ico gpu"></span>GPU 监测</a>
       <a class="nav-item" data-page="cpu"><span class="ico cpu"></span>CPU 监测</a>
       <a class="nav-item" data-page="mem"><span class="ico mem"></span>内存监测</a>
+      <a class="nav-item" data-page="system"><span class="ico sys"></span>系统信息</a>
       <a class="nav-item" data-page="history"><span class="ico hist"></span>历史记录</a>
       <a class="nav-item" data-page="settings"><span class="ico st"></span>设置</a>
     </nav>
@@ -680,6 +690,18 @@
       </div>
     </section>
 
+    <!-- ===================== 系统信息 页面 ===================== -->
+    <section id="page-system" class="page" hidden>
+      <div class="page-head">
+        <h2>系统信息</h2>
+        <div class="sub">当前设备硬件规格详情（静态信息，无需实时监控）</div>
+      </div>
+      <div id="sysContent" class="sys-grid"></div>
+      <div class="note" style="color:var(--muted);font-size:11.5px">
+        说明：本页展示设备的静态硬件规格（型号 / 架构 / 缓存 / 总线 / 主板 / BIOS / 电源等），不含实时使用率。Windows 通过 WMI 读取，Linux 通过 /proc、sysfs 与 dmidecode 读取；无法读取的字段显示 N/A。
+      </div>
+    </section>
+
     <!-- ===================== 历史记录 页面 ===================== -->
     <section id="page-history" class="page" hidden>
       <div class="page-head">
@@ -933,7 +955,9 @@ var ZH2EN = {
   // 侧栏 / 导航
   "系统监测台":"System Monitor","GPU · CPU · 内存":"GPU · CPU · Memory",
   "整机概览":"Overview","GPU 监测":"GPU Monitor","CPU 监测":"CPU Monitor",
-  "内存监测":"Memory Monitor","历史记录":"History","设置":"Settings",
+  "内存监测":"Memory Monitor","历史记录":"History","设置":"Settings","系统信息":"System Info",
+  "当前设备硬件规格详情（静态信息，无需实时监控）":"Static hardware specifications of the current device (no real-time monitoring)",
+  "说明：本页展示设备的静态硬件规格（型号 / 架构 / 缓存 / 总线 / 主板 / BIOS / 电源等），不含实时使用率。Windows 通过 WMI 读取，Linux 通过 /proc、sysfs 与 dmidecode 读取；无法读取的字段显示 N/A。":"This page lists static hardware specs (model / architecture / cache / bus / motherboard / BIOS / power, etc.) without real-time usage. Windows reads via WMI, Linux via /proc, sysfs and dmidecode; unreadable fields show N/A.",
   // 页头
   "CPU · GPU · 内存 汇总 · 整机功率与电费（跨重启持久化累计）":"CPU · GPU · Memory summary · total system power & electricity cost (persisted across restarts)",
   "GPU 监测面板":"GPU Monitor","正在连接 NVML …":"Connecting to NVML …",
@@ -1135,6 +1159,7 @@ function applyLang(){
   else if(activePage==="mem" && latestMem) renderMem(latestMem);
   else if(activePage==="overview") renderOverview();
   else if(activePage==="history") loadHistory();
+  else if(activePage==="system" && latestSys){ renderSystem(latestSys); applyTranslations(document.getElementById("page-system")); }
   drawActiveCharts(); clock();
 }
 (function(){
@@ -1156,6 +1181,7 @@ const H = { flops:[], gpu:[], mem:[], pwr:[], tmp:[], smclk:[], memclk:[], enc:[
 let activePage = "overview";
 let curFlops = null, latestCpu = null, latestMem = null;
 let latestGpu = null, latestGpus = [], latestCluster = null, selectedGpuIdx = 0, selectedCpuIdx = 0;
+let latestSys = null;   // /api/system 返回的静态硬件规格
 let latestGpuReason = null;   // /api/metrics 返回的 gpu_unavailable_reason
 let procData = [], procSort = {key: "vram_mb", dir: -1};
 let histRange = "24h";
@@ -1866,6 +1892,7 @@ function setPage(p){
   document.querySelectorAll(".page").forEach(s=>s.hidden=(s.id!=="page-"+p));
   if(p==="settings") renderSettings();
   if(p==="history") loadHistory();
+  if(p==="system") loadSystemInfo();
   drawActiveCharts();
   applyTranslations();
 }
@@ -1875,6 +1902,154 @@ document.querySelectorAll(".hist-range").forEach(b=>b.addEventListener("click",(
   b.classList.add("active");
   histRange=b.dataset.range; loadHistory();
 }));
+
+/* ---------------- 系统信息 页面 (静态硬件规格) ---------------- */
+function loadSystemInfo(){
+  fetchJSON("/api/system").then(function(d){
+    if(d){ latestSys=d; renderSystem(d); applyTranslations(document.getElementById("page-system")); }
+  });
+}
+function sysSection(title, rows){
+  if(!rows) rows="";
+  return '<div class="sys-card"><div class="sys-card-h">'+esc(title)+'</div><div class="sys-rows">'+rows+'</div></div>';
+}
+function sysRow(k, v){
+  if(v===null||v===undefined||v==="") v="N/A";
+  return '<div class="sys-row"><span class="sys-k">'+esc(k)+'</span><span class="sys-v">'+esc(String(v))+'</span></div>';
+}
+function sysRowT(kZh,kEn,v){ return sysRow(t(kZh,kEn), v); }
+function renderSystem(d){
+  if(!d) return;
+  var html="";
+  // 操作系统
+  var o=d.os||{};
+  html += sysSection(t("操作系统","Operating System"),
+    sysRowT("系统","System", o.system) +
+    sysRowT("发行版","Release", o.release) +
+    sysRowT("版本","Version", o.version) +
+    sysRowT("架构","Architecture", o.machine) +
+    sysRowT("处理器","Processor", o.processor) +
+    sysRowT("Python 版本","Python Version", o.python_version) +
+    sysRowT("应用版本","App Version", o.app_version) +
+    sysRowT("C 运行库","C Runtime", o.libc)
+  );
+  // 主机
+  var h=d.host||{};
+  html += sysSection(t("主机","Host"),
+    sysRowT("主机名","Hostname", h.hostname) +
+    sysRowT("平台","Platform", h.platform)
+  );
+  // CPU (每路)
+  (d.cpus||[]).forEach(function(c, i){
+    var title = t("CPU 插槽 {{i}}","CPU Socket {{i}}",{i:i}) + (c.name? " · "+c.name : "");
+    html += sysSection(title,
+      sysRowT("型号","Model", c.name) +
+      sysRowT("插槽","Socket", c.socket) +
+      sysRowT("物理核心","Physical Cores", c.cores) +
+      sysRowT("逻辑线程","Logical Threads", c.threads) +
+      sysRowT("最大频率","Max Clock", c.max_mhz? c.max_mhz+" MHz":"N/A") +
+      sysRowT("基准频率","Base Clock", c.base_mhz? c.base_mhz+" MHz":"N/A") +
+      sysRowT("电压","Voltage", c.voltage_v!=null? c.voltage_v+" V":"N/A") +
+      sysRowT("TDP","TDP", c.tdp_w!=null? c.tdp_w+" W":"N/A") +
+      sysRowT("微架构","Architecture", c.architecture) +
+      sysRowT("厂商","Manufacturer", c.manufacturer) +
+      sysRowT("家族/型号/步进","Family/Model/Stepping", [c.family, c.model, c.stepping].filter(function(x){return x!=null;}).join(" / ")) +
+      sysRowT("L2 缓存","L2 Cache", c.l2_cache_kb? (c.l2_cache_kb/1024).toFixed(1)+" MB":"N/A") +
+      sysRowT("L3 缓存","L3 Cache", c.l3_cache_kb? (c.l3_cache_kb/1024).toFixed(1)+" MB":"N/A") +
+      sysRowT("虚拟化","Virtualization", c.virtualization? t("支持","Supported"):t("不支持","Not supported")) +
+      sysRowT("指令集","Instruction Sets", (c.instruction_sets&&c.instruction_sets.length)? c.instruction_sets.join(", "):"N/A")
+    );
+  });
+  // GPU (每张)
+  (d.gpus||[]).forEach(function(g, i){
+    if(g.error){ html += sysSection(t("GPU {{i}}","GPU {{i}}",{i:i}), sysRow(t("状态","Status"), t("无数据/未识别","No data / not recognized"))); return; }
+    var arch = g.arch + (g.spec_guessed? t("（估算）","(estimated)"):"");
+    var pcie = [g.pcie_gen? t("Gen {{g}}","Gen {{g}}",{g:g.pcie_gen}):null, g.pcie_width? "x"+g.pcie_width:null].filter(Boolean).join(" ") || "N/A";
+    html += sysSection(t("GPU {{i}}","GPU {{i}}",{i:i}) + (g.name? " · "+g.name : ""),
+      sysRowT("型号","Model", g.name) +
+      sysRowT("索引","Index", g.index) +
+      sysRowT("UUID","UUID", g.uuid) +
+      sysRowT("驱动版本","Driver", g.driver) +
+      sysRowT("CUDA 版本","CUDA Version", g.cuda_version) +
+      sysRowT("架构","Architecture", arch) +
+      sysRowT("CUDA 核心","CUDA Cores", g.cuda_cores) +
+      sysRowT("Tensor 核心","Tensor Cores", g.tensor_cores) +
+      sysRowT("显存容量","VRAM", g.memory_gib!=null? g.memory_gib+" GiB":"N/A") +
+      sysRowT("显存带宽","VRAM Bandwidth", g.bandwidth_gbps!=null? g.bandwidth_gbps+" GB/s":"N/A") +
+      sysRowT("加速频率","Boost Clock", g.boost_clock_ghz!=null? g.boost_clock_ghz+" GHz":"N/A") +
+      sysRowT("FP32 峰值","FP32 Peak", g.fp32_tflops!=null? g.fp32_tflops+" TFLOPS":"N/A") +
+      sysRowT("FP16 峰值","FP16 Peak", g.fp16_tflops!=null? g.fp16_tflops+" TFLOPS":"N/A") +
+      sysRowT("FP16 Tensor 稠密","FP16 Tensor Dense", g.tensor_fp16_dense_tflops!=null? g.tensor_fp16_dense_tflops+" TFLOPS":"N/A") +
+      sysRowT("功率上限","Power Limit", g.power_limit_w!=null? g.power_limit_w+" W":"N/A") +
+      sysRowT("PCIe 链路","PCIe Link", pcie) +
+      sysRowT("计算模式","Compute Mode", g.compute_mode)
+    );
+  });
+  if(!(d.gpus&&d.gpus.length)) html += sysSection(t("GPU","GPU"), sysRow(t("状态","Status"), t("未检测到 NVIDIA GPU","No NVIDIA GPU detected")));
+  // 内存
+  var m=d.memory||{};
+  var mrows = sysRowT("总容量","Total Capacity", m.total_gib!=null? m.total_gib+" GiB":"N/A") +
+              sysRowT("频率","Speed", m.speed_mhz? m.speed_mhz+" MT/s":"N/A") +
+              sysRowT("内存条数","Module Count", m.module_count);
+  (m.modules||[]).forEach(function(mod, i){
+    mrows += '<div class="sys-sub">'+esc(t("内存条 {{i}}","Module {{i}}",{i:i+1}))+'</div>' +
+      sysRowT("容量","Capacity", mod.capacity_gib!=null? mod.capacity_gib+" GiB":"N/A") +
+      sysRowT("频率","Speed", mod.speed_mhz? mod.speed_mhz+" MT/s":"N/A") +
+      sysRowT("厂商","Manufacturer", mod.manufacturer) +
+      sysRowT("部件号","Part Number", mod.part_number) +
+      sysRowT("插槽","Locator", mod.locator) +
+      sysRowT("形态","Form Factor", mod.form_factor) +
+      sysRowT("类型","Type", mod.type) +
+      sysRowT("序列号","Serial", mod.serial);
+  });
+  html += sysSection(t("内存","Memory"), mrows);
+  // 主板
+  var mb=d.motherboard||{};
+  html += sysSection(t("主板","Motherboard"),
+    sysRowT("厂商","Manufacturer", mb.manufacturer) +
+    sysRowT("型号","Model", mb.product) +
+    sysRowT("版本","Version", mb.version) +
+    sysRowT("序列号","Serial", mb.serial)
+  );
+  // BIOS
+  var bios=d.bios||{};
+  html += sysSection(t("BIOS","BIOS"),
+    sysRowT("厂商","Manufacturer", bios.manufacturer) +
+    sysRowT("版本","Version", bios.version) +
+    sysRowT("发布日期","Release Date", bios.release_date) +
+    sysRowT("序列号","Serial", bios.serial)
+  );
+  // 电源
+  var pw=d.power||{};
+  var praw = sysRowT("系统类型","System Type", pw.system_type);
+  if(pw.batteries){
+    pw.batteries.forEach(function(b,i){
+      praw += '<div class="sys-sub">'+esc(t("电池 {{i}}","Battery {{i}}",{i:i+1}))+'</div>' +
+        sysRowT("名称","Name", b.name) +
+        sysRowT("电量","Charge", b.charge_percent!=null? b.charge_percent+"%":"N/A") +
+        sysRowT("状态","Status", b.status) +
+        sysRowT("设计容量","Design Capacity", b.design_capacity!=null? b.design_capacity+" mWh":"N/A") +
+        sysRowT("化学","Chemistry", b.chemistry);
+    });
+  } else {
+    praw += sysRowT("含电池","Has Battery", pw.has_battery? t("是","Yes"):t("否","No"));
+  }
+  if(pw.active_power_plan) praw += sysRowT("电源计划","Power Plan", pw.active_power_plan);
+  if(pw.supplies&&pw.supplies.length){
+    pw.supplies.forEach(function(s,i){
+      praw += '<div class="sys-sub">'+esc(t("供电 {{i}}","Supply {{i}}",{i:i+1}))+'</div>' +
+        sysRowT("名称","Name", s.name) +
+        sysRowT("类型","Type", s.type) +
+        sysRowT("状态","Status", s.status) +
+        sysRowT("电量","Capacity", s.capacity_percent!=null? s.capacity_percent+"%":"N/A") +
+        sysRowT("电压","Voltage", s.voltage_uv!=null? (s.voltage_uv/1e6).toFixed(3)+" V":"N/A") +
+        sysRowT("技术","Technology", s.technology);
+    });
+  }
+  html += sysSection(t("电源","Power"), praw);
+  var el=document.getElementById("sysContent");
+  if(el) el.innerHTML=html;
+}
 bindProcSort();
 
 /* ---------------- 多卡 GPU 选择卡片 ---------------- */

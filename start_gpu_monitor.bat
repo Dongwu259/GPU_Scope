@@ -15,7 +15,7 @@ REM ============================================================
 setlocal
 cd /d "%~dp0"
 
-REM Locate a Python 3.8+ interpreter (deps are bundled in pylibs/, no pip needed)
+REM Locate a Python 3.8+ interpreter (deps: pylibs/ is used if present next to the script; otherwise run: pip install -r requirements.txt)
 set "PY="
 where pythonw >nul 2>nul && set "PY=pythonw.exe"
 if not defined PY where python >nul 2>nul && set "PY=python.exe"
@@ -83,6 +83,6 @@ exit /b
 :nopy
 echo [GPU Monitor] ERROR: Python not found in PATH.
 echo   Install Python 3.8+ (tick "Add python.exe to PATH") from https://www.python.org/downloads/
-echo   then run this script again. Runtime deps are bundled in pylibs/, no pip install needed.
+echo   then run this script again. If NVIDIA deps (pynvml/psutil) are missing, run: pip install -r requirements.txt
 pause
 exit /b 1

@@ -19,12 +19,14 @@
 
 # 版本号唯一真源: CHANGELOG / pyproject.toml / HTTP Server 头 / 前端「关于」卡片
 # 都以此为准。发版时只需改这里 + CHANGELOG 条目。
-__version__ = "0.1.5"
+__version__ = "0.1.7"
 
 import argparse
 import ctypes
 import json
+import locale
 import os
+import platform
 import re
 import secrets
 import shutil
@@ -142,10 +144,12 @@ def _nv(arch, cuda_cores, tensor_cores, mem_gib, bw_gbps, boost_ghz,
     }
 
 
-def _dc(arch, cc, tc, mem, bw, boost, fp16_tc_dense, fp8=True):
+def _dc(arch, cc, tc, mem, bw, boost, fp16_tc_dense, fp8=True, fp32_override=None):
     """数据中心卡: 直接给定 FP16 Tensor 稠密峰值, 其余按通用关系推导
-    (fp32=CC*2*boost/1e3; fp16=2×fp32; fp8 稠密≈2×fp16-tc-稠密;  Blackwell 之前无 fp4)。"""
-    fp32 = cc * 2 * boost / 1e3
+    (fp32=CC*2*boost/1e3; fp16=2×fp32; fp8 稠密≈2×fp16-tc-稠密;  Blackwell 之前无 fp4)。
+    fp32_override: 当官方标称 FP32(着色器峰值)与 CC×2×boost 推算不一致时(如 H100 的
+    着色器 FP32=51.2 而 Tensor FP32=67)显式给定, 使 FP32 行对齐官方 datasheet。"""
+    fp32 = float(fp32_override) if fp32_override else cc * 2 * boost / 1e3
     fp16 = fp32 * 2
     d = fp16_tc_dense
     s = d * 2
@@ -180,8 +184,10 @@ def _amd(arch, cc, mem, bw, boost, matrix_mult=1.0, fp8=False):
     }
 
 
-def _intel(arch, cc, mem, bw, boost, matrix_mult=2.0, fp8=False):
-    """Intel Arc (Xe): fp32 = SP×2×boost; fp16=2×fp32; XMX 矩阵稠密≈matrix_mult×fp16 着色器。"""
+def _intel(arch, cc, mem, bw, boost, matrix_mult=1.0, fp8=False):
+    """Intel Arc (Xe): fp32 = SP×2×boost; fp16=2×fp32; XMX 矩阵稠密≈matrix_mult×fp16 着色器。
+    Intel XMX FP16 稠密 = 2×FP32(与 NVIDIA Tensor 的 4×FP32 不同), 故默认 matrix_mult=1.0
+    (d = fp16 = 2×fp32)。此前误设 2.0 导致 XMX 被高估一倍。"""
     fp32 = cc * 2 * boost / 1e3
     fp16 = fp32 * 2
     d = fp16 * matrix_mult
@@ -263,11 +269,11 @@ GPU_SPECS = {
     "NVIDIA A100-SXM4-40GB": _dc("Ampere (GA100)", 6912, 432, 40, 1555, 1.41, 312.0, fp8=True),
     "NVIDIA A100-PCIe-40GB": _dc("Ampere (GA100)", 6912, 432, 40, 1555, 1.41, 312.0, fp8=True),
     "NVIDIA A800-SXM4-80GB": _dc("Ampere (GA100)", 6912, 432, 80, 2039, 1.41, 312.0, fp8=True),
-    "NVIDIA H100-SXM-80GB": _dc("Hopper (GH100)", 16896, 528, 80, 3350, 1.98, 989.0, fp8=True),
-    "NVIDIA H100-PCIe-80GB": _dc("Hopper (GH100)", 16896, 528, 80, 2000, 1.83, 756.0, fp8=True),
-    "NVIDIA H800-SXM-80GB": _dc("Hopper (GH100)", 16896, 528, 80, 3350, 1.98, 989.0, fp8=True),
-    "NVIDIA L40S": _dc("Ada Lovelace (AD102)", 18176, 568, 48, 864, 2.52, 733.0, fp8=True),
-    "NVIDIA L40": _dc("Ada Lovelace (AD102)", 18176, 568, 48, 864, 2.31, 669.0, fp8=True),
+    "NVIDIA H100-SXM-80GB": _dc("Hopper (GH100)", 16896, 528, 80, 3350, 1.98, 989.0, fp8=True, fp32_override=51.2),
+    "NVIDIA H100-PCIe-80GB": _dc("Hopper (GH100)", 16896, 528, 80, 2000, 1.83, 756.0, fp8=True, fp32_override=48.4),
+    "NVIDIA H800-SXM-80GB": _dc("Hopper (GH100)", 16896, 528, 80, 3350, 1.98, 989.0, fp8=True, fp32_override=51.2),
+    "NVIDIA L40S": _dc("Ada Lovelace (AD102)", 18176, 568, 48, 864, 2.52, 733.0, fp8=True, fp32_override=91.6),
+    "NVIDIA L40": _dc("Ada Lovelace (AD102)", 18176, 568, 48, 864, 2.31, 669.0, fp8=True, fp32_override=90.5),
     "NVIDIA L20": _dc("Ada Lovelace (AD102)", 11776, 368, 48, 864, 2.31, 239.0, fp8=True),
     "NVIDIA L4": _dc("Ada Lovelace (AD104)", 7424, 232, 24, 300, 2.46, 121.0, fp8=True),
     "NVIDIA A40": _dc("Ampere (GA102)", 10752, 336, 48, 696, 1.74, 149.7, fp8=True),
@@ -325,7 +331,6 @@ GPU_SPECS = {
                          "tensor_fp8_dense_tflops": 0.0, "tensor_fp8_sparse_tflops": 0.0,
                          "tensor_fp4_dense_tflops": 0.0, "tensor_fp4_sparse_tflops": 0.0},
 }
-DEFAULT_SPEC = GPU_SPECS["NVIDIA GeForce RTX 5080"]
 
 # 数值字段(供"未知型号按同代已有数据插值估算"使用)
 _SPEC_NUM_FIELDS = [
@@ -478,9 +483,9 @@ def resolve_spec(name):
     """返回 spec 字典(含 guessed 标记)。精确命中 / 归一化命中返回库值(guessed=False);
     否则返回估算(guessed=True)。spec 始终含全部字段, 调用方无需再判缺失。"""
     if not name:
-        s = dict(DEFAULT_SPEC)
-        s["guessed"] = True
-        return s
+        # 名称缺失时不再回退到某张具体卡(避免误用 5080 高性能参数),
+        # 改用全库 fp32 中位数作保守估算。
+        return _conservative_spec("", "other")
     if name in GPU_SPECS:
         s = dict(GPU_SPECS[name])
         s["guessed"] = False
@@ -1947,6 +1952,570 @@ def _init_sys_static():
             pass
 
 
+# ---------------------------------------------------------------------------
+# 「系统信息」页: 静态硬件规格详情 (CPU / GPU / 内存 / 主板 / BIOS / 电源)
+# 这些信息是硬件固有属性, 进程内只采集一次 (SYS_DETAIL 缓存), 重启服务才刷新。
+# 设计原则: 平台能力有差异时优雅降级 (None / 空列表), 前端据此显示 N/A, 绝不伪造。
+# ---------------------------------------------------------------------------
+SYS_DETAIL = None  # 缓存: 系统静态规格详情
+
+
+def _read_int(path):
+    try:
+        with open(path) as f:
+            s = f.read().strip()
+        if s.endswith("K"):
+            return int(s[:-1])
+        return int(s)
+    except Exception:
+        return None
+
+
+def _parse_int(s):
+    try:
+        return int(s)
+    except Exception:
+        return None
+
+
+def _cpu_instruction_sets(flags, machine):
+    """根据 /proc/cpuinfo flags 推断支持的 SIMD / 扩展指令集。"""
+    flags = set((flags or "").split())
+    sets = []
+    table = [
+        ("SSE", "sse"), ("SSE2", "sse2"), ("SSE3", "sse3"), ("SSSE3", "ssse3"),
+        ("SSE4.1", "sse4_1"), ("SSE4.2", "sse4_2"), ("AVX", "avx"), ("AVX2", "avx2"),
+        ("FMA3", "fma"), ("FMA4", "fma4"), ("BMI1/2", "bmi1"), ("AES-NI", "aes"),
+        ("SHA-NI", "sha_ni"), ("AVX-512 F", "avx512f"), ("AVX-512 VNNI", "avx512_vnni"),
+        ("AVX-512 BF16", "avx512_bf16"), ("AVX-512 FP16", "avx512_fp16"),
+    ]
+    for label, tok in table:
+        if tok in flags:
+            sets.append(label)
+    arch = (machine or "").lower()
+    if "aarch64" in arch or "arm64" in arch:
+        sets.append("NEON (ARMv8)")
+    # 注意: WMI 返回的架构串是 'x86-64'(带连字符), 而 platform.machine() 是 'x86_64',
+    # 必须同时匹配两种写法, 否则 Windows 下架构标签永远为空。
+    elif "x86_64" in arch or "x86-64" in arch or "amd64" in arch:
+        sets.append("x86-64")
+    elif "arm" in arch:
+        sets.append("ARMv7")
+    return sets
+
+
+def _wmi_instruction_sets():
+    """Windows 下用 IsProcessorFeaturePresent 真实探测 SIMD 扩展 (不依赖 /proc/cpuinfo)。
+
+    指令集按操作系统 API 实测, 绝不臆造; 探测失败时回退到空列表。
+    参考: https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-isprocessorfeaturepresent
+    """
+    try:
+        k = ctypes.windll.kernel32
+        k.IsProcessorFeaturePresent.restype = ctypes.c_int
+        k.IsProcessorFeaturePresent.argtypes = [ctypes.c_uint]
+        # 仅选取与 SIMD 相关的确定性常量 (其余如 PAE/NX 非指令集, 不列入)
+        PF = {
+            6: "SSE", 10: "SSE2", 13: "SSE3", 36: "SSSE3",
+            37: "SSE4.1", 38: "SSE4.2", 39: "AVX", 40: "AVX2",
+            41: "AVX-512 F", 17: "XSAVE",
+        }
+        out = []
+        for fid, label in PF.items():
+            try:
+                if k.IsProcessorFeaturePresent(fid):
+                    out.append(label)
+            except Exception:
+                pass
+        return out
+    except Exception:
+        return []
+
+
+def _wmi_arch(n):
+    return {0: "x86", 1: "MIPS", 2: "Alpha", 3: "PowerPC", 5: "ARM",
+            6: "IA-64", 9: "x86-64", 12: "ARM64"}.get(n, "未知 (%s)" % n)
+
+
+def _mem_formfactor(n):
+    return {8: "DIMM", 12: "SODIMM", 13: "TSOP", 14: "RIMM",
+            15: "SODIMM DDR", 17: "FB-DIMM"}.get(n, None)
+
+
+def _mem_type(n):
+    # SMBIOS MemoryType
+    return {20: "DDR", 21: "DDR2", 24: "DDR3", 26: "DDR4",
+            33: "LPDDR3", 34: "DDR5", 35: "LPDDR5"}.get(n, None)
+
+
+def _pc_system_type(n):
+    return {1: "台式机", 2: "笔记本/移动设备", 3: "工作站", 4: "企业服务器",
+            5: "瘦客户机", 6: "设备/嵌入式", 7: "平板", 8: "可转换/二合一",
+            9: "IoT 网关", 10: "SoC/嵌入式", 11: "平板(小型)",
+            12: "双启动可转换", 13: "双启动平板"}.get(n, None)
+
+
+def _battery_status(n):
+    return {1: "放电中", 2: "连接交流电源(AC)", 3: "充满/交流电",
+            4: "电量低", 5: "严重低电量", 6: "充电中", 7: "充电中且电量高",
+            8: "充电中且电量低", 9: "充电中且电量临界", 10: "未充电",
+            11: "部分充电(未充满)"}.get(n, None)
+
+
+def _battery_chem(n):
+    return {1: "其它", 2: "铅酸", 3: "镍镉", 4: "镍氢",
+            5: "锂电", 6: "锌空", 7: "锂聚合物"}.get(n, None)
+
+
+def _glibc_version():
+    try:
+        out = subprocess.run(["getconf", "GNU_LIBC_VERSION"], capture_output=True,
+                             timeout=5, creationflags=CREATE_NO_WINDOW)
+        return out.stdout.decode("utf-8", "replace").strip() or None
+    except Exception:
+        return None
+
+
+def _os_info():
+    try:
+        return {
+            "system": platform.system() or sys.platform,
+            "release": platform.release(),
+            "version": platform.version(),
+            "machine": platform.machine(),
+            "processor": platform.processor() or None,
+            "python_version": platform.python_version(),
+            "app_version": __version__,
+            "libc": _glibc_version(),
+        }
+    except Exception:
+        return {"system": sys.platform, "python_version": platform.python_version(),
+                "app_version": __version__}
+
+
+def _host_info():
+    try:
+        return {"hostname": socket.gethostname(), "platform": sys.platform}
+    except Exception:
+        return {}
+
+
+def _cpu_detail():
+    base = SYS_STATIC.get("cpus", []) or []
+    try:
+        if IS_WINDOWS:
+            return _wmi_cpu_detail(base)
+        if IS_LINUX:
+            return _linux_cpu_detail(base)
+    except Exception:
+        pass
+    return [dict(c) for c in base]
+
+
+def _wmi_cpu_detail(base):
+    script = ("Get-CimInstance Win32_Processor | Select Name,NumberOfCores,"
+              "NumberOfLogicalProcessors,MaxClockSpeed,CurrentVoltage,L2CacheSize,"
+              "L3CacheSize,Family,Model,Stepping,Manufacturer,ProcessorId,Architecture,"
+              "VirtualizationFirmwareEnabled,SecondLevelAddressTranslationExtensions,"
+              "DataWidth | ConvertTo-Json")
+    out = _wmi_json(script)
+    res = []
+    try:
+        if out:
+            d = json.loads(out)
+            if isinstance(d, dict):
+                d = [d]
+            for i, item in enumerate(d):
+                b = base[i] if i < len(base) else {}
+                res.append({
+                    "name": (item.get("Name") or "").strip() or b.get("name"),
+                    "socket": i,
+                    "cores": item.get("NumberOfCores") or b.get("cores"),
+                    "threads": item.get("NumberOfLogicalProcessors") or b.get("threads"),
+                    "max_mhz": item.get("MaxClockSpeed") or b.get("max_mhz"),
+                    "base_mhz": None,
+                    "voltage_v": (round(item["CurrentVoltage"] * 0.1, 3)
+                                  if item.get("CurrentVoltage") else b.get("voltage_v")),
+                    "tdp_w": b.get("tdp_w"),
+                    "family": item.get("Family"),
+                    "model": item.get("Model"),
+                    "stepping": item.get("Stepping"),
+                    "l2_cache_kb": item.get("L2CacheSize"),
+                    "l3_cache_kb": item.get("L3CacheSize"),
+                    "architecture": _wmi_arch(item.get("Architecture")),
+                    "manufacturer": (item.get("Manufacturer") or "").strip() or None,
+                    "processor_id": item.get("ProcessorId"),
+                    "virtualization": bool(item.get("VirtualizationFirmwareEnabled")),
+                    # Windows 用 IsProcessorFeaturePresent 真实探测 SIMD, 再补架构标签
+                    "instruction_sets": _wmi_instruction_sets()
+                    + _cpu_instruction_sets(None, _wmi_arch(item.get("Architecture"))),
+                })
+    except Exception:
+        pass
+    return res or [dict(c) for c in base]
+
+
+def _linux_cpu_detail(base):
+    res = []
+    try:
+        info = {}
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if line.strip():
+                    k, _, v = line.partition(":")
+                    info[k.strip()] = v.strip()
+                else:
+                    break  # 第一块即首个逻辑核, 含全部型号信息
+        flags = info.get("flags", "")
+        machine = platform.machine()
+        sets = _cpu_instruction_sets(flags, machine)
+        l2 = _read_int("/sys/devices/system/cpu/cpu0/cache/index2/size")
+        l3 = _read_int("/sys/devices/system/cpu/cpu0/cache/index3/size")
+        base_mhz = _linux_base_mhz()
+        for i, c in enumerate(base):
+            res.append({
+                "name": c.get("name"), "socket": i,
+                "cores": c.get("cores"), "threads": c.get("threads"),
+                "max_mhz": c.get("max_mhz"), "base_mhz": base_mhz,
+                "voltage_v": c.get("voltage_v"), "tdp_w": c.get("tdp_w"),
+                "family": info.get("cpu family"), "model": info.get("model"),
+                "stepping": info.get("stepping"),
+                "l2_cache_kb": l2, "l3_cache_kb": l3,
+                "architecture": machine,
+                "manufacturer": ("ARM" if "arm" in machine else
+                                 ("Apple" if "apple" in machine else None)),
+                "processor_id": info.get("processor"),
+                "virtualization": ("vmx" in flags or "svm" in flags),
+                "instruction_sets": sets,
+            })
+    except Exception:
+        pass
+    return res or [dict(c) for c in base]
+
+
+def _linux_base_mhz():
+    m = _read_int("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq")
+    return (m // 1000) if m else None
+
+
+def _memory_detail():
+    total_gib = SYS_STATIC.get("ram_total_gib")
+    if not total_gib and psutil:
+        try:
+            total_gib = round(psutil.virtual_memory().total / (1024 ** 3), 1)
+        except Exception:
+            pass
+    speed = SYS_STATIC.get("ram_speed_mhz")
+    modules = []
+    try:
+        if IS_WINDOWS:
+            modules = _wmi_memory_modules()
+        elif IS_LINUX:
+            modules = _linux_memory_modules()
+    except Exception:
+        pass
+    # 聚合层没拿到频率时, 用第一条内存条的速率代表整机内存频率
+    if not speed and modules:
+        speed = modules[0].get("speed_mhz")
+    return {"total_gib": total_gib, "speed_mhz": speed,
+            "modules": modules, "module_count": len(modules)}
+
+
+def _wmi_memory_modules():
+    out = _wmi_json("Get-CimInstance Win32_PhysicalMemory | Select Capacity,Speed,"
+                    "Manufacturer,PartNumber,BankLabel,DeviceLocator,FormFactor,"
+                    "SMBIOSMemoryType,SerialNumber,ConfiguredClockSpeed | ConvertTo-Json")
+    res = []
+    if not out:
+        return res
+    try:
+        d = json.loads(out)
+        if isinstance(d, dict):
+            d = [d]
+        for m in d:
+            cap = m.get("Capacity")
+            res.append({
+                "capacity_gib": round(int(cap) / (1024 ** 3), 1) if cap else None,
+                "speed_mhz": m.get("Speed") or m.get("ConfiguredClockSpeed"),
+                "manufacturer": (m.get("Manufacturer") or "").strip() or None,
+                "part_number": (m.get("PartNumber") or "").strip() or None,
+                "locator": (m.get("DeviceLocator") or m.get("BankLabel") or "").strip() or None,
+                "form_factor": _mem_formfactor(m.get("FormFactor")),
+                "type": _mem_type(m.get("SMBIOSMemoryType")),
+                "serial": (m.get("SerialNumber") or "").strip() or None,
+            })
+    except Exception:
+        pass
+    return res
+
+
+def _parse_dmi_size(s):
+    try:
+        s = (s or "").strip()
+        if not s or s.lower() in ("no module installed", "unknown"):
+            return None
+        num = float(re.match(r"([\d.]+)", s).group(1))
+        if s.upper().endswith("GB"):
+            return round(num, 1)
+        if s.upper().endswith("MB"):
+            return round(num / 1024.0, 1)
+        if s.upper().endswith("KB"):
+            return round(num / (1024 ** 2), 3)
+    except Exception:
+        pass
+    return None
+
+
+def _parse_mhz(s):
+    try:
+        s = (s or "").strip()
+        if not s or s.lower() in ("unknown", "mt/s"):
+            return None
+        m = re.match(r"(\d+)", s)
+        return int(m.group(1)) if m else None
+    except Exception:
+        return None
+
+
+def _linux_memory_modules():
+    try:
+        r = subprocess.run(["dmidecode", "-t", "memory"], capture_output=True,
+                           timeout=8, creationflags=CREATE_NO_WINDOW)
+        txt = r.stdout.decode("utf-8", "replace")
+    except Exception:
+        return []
+    mods, cur = [], {}
+    for line in txt.splitlines():
+        s = line.strip()
+        if s.startswith("Memory Device"):
+            if cur:
+                mods.append(cur)
+            cur = {}
+            continue
+        if ":" in s:
+            k, _, v = s.partition(":")
+            k = k.strip().lower().replace(" ", "_")
+            if k in ("size", "speed", "manufacturer", "part_number",
+                     "locator", "bank_locator", "type", "form_factor", "serial_number"):
+                cur[k] = v.strip()
+    if cur:
+        mods.append(cur)
+    res = []
+    for m in mods:
+        sz = m.get("size", "")
+        if not sz or "module" in sz.lower():
+            continue
+        res.append({
+            "capacity_gib": _parse_dmi_size(sz),
+            "speed_mhz": _parse_mhz(m.get("speed")),
+            "manufacturer": m.get("manufacturer") or None,
+            "part_number": m.get("part_number") or None,
+            "locator": m.get("locator") or m.get("bank_locator") or None,
+            "form_factor": m.get("form_factor") or None,
+            "type": m.get("type") or None,
+            "serial": m.get("serial_number") or None,
+        })
+    return res
+
+
+def _wmi_motherboard():
+    out = _wmi_json("Get-CimInstance Win32_BaseBoard | Select Manufacturer,Product,"
+                    "Version,SerialNumber | ConvertTo-Json")
+    try:
+        if out:
+            d = json.loads(out)
+            if isinstance(d, dict):
+                return {"manufacturer": (d.get("Manufacturer") or "").strip() or None,
+                        "product": (d.get("Product") or "").strip() or None,
+                        "version": (d.get("Version") or "").strip() or None,
+                        "serial": (d.get("SerialNumber") or "").strip() or None}
+    except Exception:
+        pass
+    return {}
+
+
+def _linux_motherboard():
+    def _g(f):
+        try:
+            with open("/sys/devices/virtual/dmi/id/%s" % f) as fh:
+                return fh.read().strip() or None
+        except Exception:
+            return None
+    return {"manufacturer": _g("board_vendor"), "product": _g("board_name"),
+            "version": _g("board_version"), "serial": _g("board_serial")}
+
+
+def _wmi_bios():
+    out = _wmi_json("Get-CimInstance Win32_BIOS | Select Manufacturer,Version,"
+                    "ReleaseDate,SerialNumber | ConvertTo-Json")
+    try:
+        if out:
+            d = json.loads(out)
+            if isinstance(d, dict):
+                rel = d.get("ReleaseDate")
+                return {"manufacturer": (d.get("Manufacturer") or "").strip() or None,
+                        "version": (d.get("Version") or "").strip() or None,
+                        "release_date": _wmi_datetime(rel) if rel else None,
+                        "serial": (d.get("SerialNumber") or "").strip() or None}
+    except Exception:
+        pass
+    return {}
+
+
+def _wmi_datetime(s):
+    # 两种常见格式:
+    #  - PowerShell ConvertTo-Json 把 [DateTime] 序列化为 "/Date(1737072000000)/" (epoch 毫秒)
+    #  - 或原始 "20250117000000.000000+000"
+    if not s:
+        return None
+    m = re.search(r"/Date\((\d+)\)", s)
+    if m:
+        try:
+            return datetime.fromtimestamp(int(m.group(1)) / 1000).strftime("%Y-%m-%d")
+        except Exception:
+            return None
+    m = re.search(r"(\d{4})[-/]?(\d{2})[-/]?(\d{2})", s)
+    if m:
+        return "%s-%s-%s" % (m.group(1), m.group(2), m.group(3))
+    return None
+
+
+def _ansi_decode(b):
+    """把子进程输出按系统 ANSI 代码页解码 (中文 Windows 为 GBK/cp936), 失败回退 utf-8。
+    注意: Python 的 locale.getpreferredencoding() 在部分环境会返回 cp1252 而非 GBK,
+    导致 powercfg 等输出中文乱码。故优先用 kernel32.GetACP() 取真实 ANSI 代码页。"""
+    cp = 0
+    try:
+        cp = ctypes.windll.kernel32.GetACP()
+    except Exception:
+        cp = 0
+    encs = []
+    if cp:
+        encs.append("cp%d" % cp)
+    encs.append(locale.getpreferredencoding(False))
+    encs += ["gbk", "utf-8", "mbcs"]
+    for enc in encs:
+        if not enc:
+            continue
+        try:
+            return b.decode(enc, "replace")
+        except Exception:
+            continue
+    try:
+        return b.decode("utf-8", "replace")
+    except Exception:
+        return str(b)
+
+
+def _linux_bios():
+    def _g(f):
+        try:
+            with open("/sys/devices/virtual/dmi/id/%s" % f) as fh:
+                return fh.read().strip() or None
+        except Exception:
+            return None
+    return {"manufacturer": _g("bios_vendor"), "version": _g("bios_version"),
+            "release_date": _g("bios_date"), "serial": _g("bios_serial")}
+
+
+def _wmi_power():
+    info = {}
+    try:
+        out = _wmi_json("Get-CimInstance Win32_ComputerSystem | Select PCSystemType | ConvertTo-Json")
+        if out:
+            d = json.loads(out)
+            info["system_type"] = _pc_system_type(d.get("PCSystemType"))
+    except Exception:
+        pass
+    try:
+        out = _wmi_json("Get-CimInstance Win32_Battery | Select Name,EstimatedChargeRemaining,"
+                        "BatteryStatus,DesignCapacity,Chemistry | ConvertTo-Json")
+        if out:
+            d = json.loads(out)
+            if isinstance(d, dict):
+                d = [d]
+            bats = []
+            for b in d:
+                bats.append({
+                    "name": (b.get("Name") or "").strip() or None,
+                    "charge_percent": b.get("EstimatedChargeRemaining"),
+                    "status": _battery_status(b.get("BatteryStatus")),
+                    "design_capacity": b.get("DesignCapacity"),
+                    "chemistry": _battery_chem(b.get("Chemistry")),
+                })
+            info["batteries"] = bats
+            info["has_battery"] = True
+    except Exception:
+        pass
+    if "batteries" not in info:
+        info["has_battery"] = False
+    try:
+        r = subprocess.run(["powercfg", "/getactivescheme"], capture_output=True,
+                            timeout=10, creationflags=CREATE_NO_WINDOW)
+        txt = _ansi_decode(r.stdout)
+        m = re.search(r"([0-9a-fA-F-]{36,})\s*\(([^)]+)\)", txt)
+        if m:
+            info["active_power_plan"] = m.group(2).strip()
+            info["active_power_plan_guid"] = m.group(1)
+    except Exception:
+        pass
+    return info
+
+
+def _linux_power():
+    info = {"supplies": []}
+    try:
+        base = "/sys/class/power_supply"
+        for name in sorted(os.listdir(base)):
+            pdir = os.path.join(base, name)
+
+            def _r(f):
+                try:
+                    with open(os.path.join(pdir, f)) as fh:
+                        return fh.read().strip()
+                except Exception:
+                    return None
+            typ = _r("type")
+            info["supplies"].append({
+                "name": name,
+                "type": ("Mains/AC" if typ == "Mains" else
+                         "Battery" if typ == "Battery" else typ),
+                "status": _r("status"),
+                "capacity_percent": _parse_int(_r("capacity")),
+                "voltage_uv": _parse_int(_r("voltage_now")),
+                "technology": _r("technology"),
+            })
+        info["has_battery"] = any(s["type"] == "Battery" for s in info["supplies"])
+    except Exception:
+        pass
+    return info
+
+
+def _collect_static_detail():
+    """采集并缓存系统静态硬件规格 (CPU/内存/主板/BIOS/电源/系统)。
+    硬件规格进程内不变, 故只算一次; 重新加载服务后才会刷新。"""
+    global SYS_DETAIL
+    if SYS_DETAIL is not None:
+        return SYS_DETAIL
+    # 确保 SYS_STATIC(CPU 基础信息/内存总容量等)已就绪, 即使 SysMonitor 尚未构造
+    # (例如直接调用 /api/system 时), 也能拿到 TDP/核心数等兜底数据。
+    try:
+        _init_sys_static()
+    except Exception:
+        pass
+    d = {
+        "os": _os_info(),
+        "host": _host_info(),
+        "cpus": _cpu_detail(),
+        "memory": _memory_detail(),
+        "motherboard": (_wmi_motherboard() if IS_WINDOWS else _linux_motherboard()),
+        "bios": (_wmi_bios() if IS_WINDOWS else _linux_bios()),
+        "power": (_wmi_power() if IS_WINDOWS else _linux_power()),
+    }
+    SYS_DETAIL = d
+    return d
+
+
 def _cpu_peaks():
     avx2 = avx512 = 0.0
     # 逐路 CPU 叠加 (服务器多路): 每路 核心数 × 最高频率 × 每周期 FLOP
@@ -2567,6 +3136,47 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/memory":
             self._send(200, json.dumps(self.sys.mem_snapshot() if self.sys else {"error": "sys monitor unavailable"}))
+            return
+        if path == "/api/system":
+            # 系统静态硬件规格详情 (CPU/内存/主板/BIOS/电源); GPU 部分由运行中
+            # 的 NVML 快照补充。该接口只读、无状态, 与监控主循环解耦, 可随时调用。
+            detail = _collect_static_detail()
+            gpus = []
+            try:
+                for g in (self.monitor.get_snapshot() or []):
+                    if not g or g.get("error"):
+                        gpus.append({"name": (g or {}).get("name"), "error": True})
+                        continue
+                    spec = g.get("spec", {}) or {}
+                    sysd = g.get("system", {}) or {}
+                    pw = g.get("power", {}) or {}
+                    gpus.append({
+                        "index": g.get("index"),
+                        "name": g.get("name"),
+                        "uuid": g.get("uuid"),
+                        "driver": g.get("driver"),
+                        "cuda_version": g.get("cuda"),
+                        "arch": spec.get("arch"),
+                        "spec_guessed": bool(spec.get("guessed")),
+                        "cuda_cores": spec.get("cuda_cores"),
+                        "tensor_cores": spec.get("tensor_cores"),
+                        "memory_gib": spec.get("memory_GiB"),
+                        "bandwidth_gbps": spec.get("bandwidth_GBps"),
+                        "boost_clock_ghz": spec.get("boost_clock_ghz"),
+                        "fp32_tflops": spec.get("fp32_tflops"),
+                        "fp16_tflops": spec.get("fp16_tflops"),
+                        "tensor_fp16_dense_tflops": spec.get("tensor_fp16_dense_tflops"),
+                        "power_limit_w": pw.get("limit_watts"),
+                        "pcie_gen": sysd.get("pcie_gen"),
+                        "pcie_width": sysd.get("pcie_width"),
+                        "pcie_max_gen": sysd.get("pcie_max_gen"),
+                        "compute_mode": sysd.get("compute_mode"),
+                    })
+            except Exception:
+                pass
+            detail = dict(detail)
+            detail["gpus"] = gpus
+            self._send(200, json.dumps(detail))
             return
         if path == "/api/settings":
             snap = self.meter.snapshot() if self.meter else {"error": "no meter"}

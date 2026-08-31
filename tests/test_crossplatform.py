@@ -339,6 +339,64 @@ def test_gpu_spec_resolution():
     # 估算 spec 的 fp16 稠密不应等于 5080 的 225.1
     check("估算 fp16 稠密 ≠ 5080 的 225.1",
           abs(spec["tensor_fp16_dense_tflops"] - 225.1) > 1.0, spec["tensor_fp16_dense_tflops"])
+    # 空名称: 名称缺失时返回保守估算(库中位数), 绝不再套用 5080 高性能参数
+    spec = gm.resolve_spec("")
+    check("空名称 -> guessed=True", spec["guessed"] is True)
+    check("空名称 arch 不含 '5080'", "5080" not in spec["arch"], spec["arch"])
+    check("空名称 arch 标注为估算", "估算" in spec["arch"], spec["arch"])
+    check("空名称 fp16 稠密 ≠ 5080 的 225.1",
+          abs(spec["tensor_fp16_dense_tflops"] - 225.1) > 1.0, spec["tensor_fp16_dense_tflops"])
+    # 锁定修复: 不得再残留 5080 硬编码兜底常量
+    check("已移除 DEFAULT_SPEC 硬编码兜底", not hasattr(gm, "DEFAULT_SPEC"))
+
+
+def test_resolve_spec_empty_name_no_5080():
+    """回归: 名称缺失时不得套用 RTX 5080 的高性能参数 (原 bug 的残留)。
+
+    空名称应回退到全库 fp32 中位数(确定性保守估算), 而非某张具体高端卡。
+    """
+    spec = gm.resolve_spec("")
+    # 复算与 _conservative_spec 一致的中位数, 验证是确定性中位数而非硬编码 5080
+    fps = sorted(v["fp32_tflops"] for v in gm.GPU_SPECS.values())
+    med = fps[len(fps) // 2]
+    check("空名称 fp32 = 全库 fp32 中位数(确定性)",
+          abs(spec["fp32_tflops"] - med) < 1e-6, (spec["fp32_tflops"], med))
+    check("空名称 fp32 ≠ 5080 的 48.5",
+          abs(spec["fp32_tflops"] - 48.5) > 5.0, spec["fp32_tflops"])
+    check("空名称 cuda_cores 归零(保守估算)", spec["cuda_cores"] == 0, spec["cuda_cores"])
+    # 两次调用结果一致(确定性)
+    check("空名称估算确定性(两次一致)",
+          abs(gm.resolve_spec("")["fp32_tflops"] - spec["fp32_tflops"]) < 1e-9)
+
+
+def test_system_detail_structure():
+    """系统详细信息页: _collect_static_detail() 结构完整、不抛异常、优雅降级。"""
+    d = gm._collect_static_detail()
+    for key in ("os", "host", "cpus", "memory", "motherboard", "bios", "power"):
+        check("静态详情含字段 %s" % key, key in d, d.get(key))
+    check("cpus 为非空列表", isinstance(d["cpus"], list) and len(d["cpus"]) > 0, d["cpus"])
+    check("memory 为字典且含 total_gib",
+          isinstance(d["memory"], dict) and "total_gib" in d["memory"], d["memory"])
+    check("os 信息为字典", isinstance(d["os"], dict), d["os"])
+    check("host 信息为字典", isinstance(d["host"], dict), d["host"])
+    # 各字段要么是有效值, 要么为 None / 'N/A' / 空串 (优雅降级, 不编造)
+    def _safe(v):
+        return v is None or v in ("N/A", "") or isinstance(v, (str, int, float, bool, list, dict))
+    check("os 结构合法(无编造)", _safe(d["os"]), d["os"])
+    check("host 结构合法(无编造)", _safe(d["host"]), d["host"])
+    if d["cpus"]:
+        c0 = d["cpus"][0]
+        check("首路 CPU 含 name/cores/threads",
+              "name" in c0 and "cores" in c0 and "threads" in c0, c0)
+        sets = c0.get("instruction_sets") or []
+        check("首路 CPU instruction_sets 非空(真实探测, 非空壳)",
+              len(sets) > 0, sets)
+        if gm.IS_WINDOWS:
+            check("Windows 指令集含架构标签 x86-64",
+                  "x86-64" in sets, sets)
+            # 任意现代 x86 CPU 至少支持 SSE/SSE2
+            check("Windows 指令集至少含 SSE/SSE2",
+                  ("SSE" in sets) or ("SSE2" in sets), sets)
 
 
 # ---------------------------------------------------------------------------
@@ -673,6 +731,10 @@ if __name__ == "__main__":
     test_h100_factor()
     print("-- 规格解析与估算 --")
     test_gpu_spec_resolution()
+    print("-- 空名称规格回归 (不得套用 5080) --")
+    test_resolve_spec_empty_name_no_5080()
+    print("-- 系统详细信息页结构 --")
+    test_system_detail_structure()
     print("=========================================")
     print("通过 %d 项" % len(PASSED))
     if KNOWN:
