@@ -1122,10 +1122,18 @@ function t(zh,en,sub){
   if(sub){ for(var k in sub){ s = s.split("{{"+k+"}}").join(sub[k]==null?"":String(sub[k])); } }
   return s;
 }
+// 记录上一次"完成完整翻译遍历"时的语言; 用于跳过无效的全文档翻译。
+var _appliedLang = null;
 // 将当前文档中可见中文文案翻译为英文 (或还原为中文); 每帧调用, 幂等
 function applyTranslations(root){
   if(!root) root=document;
   if(!root) return;
+  // 中文是源语言。若自上次完整翻译以来语言一直是中文, 模板本身已是中文,
+  // 任何频率的重复遍历都只是把中文节点再赋成中文(恒等), 纯属无效功。
+  // 每次刷新原先都会对整棵文档(含所有隐藏页/侧栏)跑一遍 TreeWalker + 属性扫描,
+  // 这是历史记录里标注的渲染性能瓶颈; 此处直接短路为零开销。
+  // 注意: 语言发生切换(zh<->en)时 _appliedLang 必然 != LANG, 不会误跳过, 翻译正确性不受影响。
+  if(LANG==="zh" && _appliedLang==="zh") return;
   var w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode:function(n){
       if(!n.nodeValue||!n.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
@@ -1149,6 +1157,7 @@ function applyTranslations(root){
       el.setAttribute(a, (LANG==="en") ? (ZH2EN[key]!==undefined?ZH2EN[key]:el["_o_"+a]) : el["_o_"+a]);
     });
   });
+  _appliedLang = LANG;
 }
 // 切换语言时: 翻译 + 重渲染当前页 (刷新 t() 文案与图表 series 名)
 function applyLang(){
@@ -2166,7 +2175,7 @@ function renderSettings(){
     document.getElementById("setDaily").innerHTML = days.length
       ? days.map(([k,v])=>`<div class="row"><span class="k">${k}</span><span class="v">${(v/1000).toFixed(3)} ${t("度","kWh")}</span></div>`).join("")
       : '<div class="row"><span class="k">'+t("暂无数据","No data")+'</span><span class="v">--</span></div>';
-    applyTranslations();
+    applyTranslations(document.getElementById("page-settings"));
   });
 }
 function setVal(id,v){ const e=document.getElementById(id); if(e && v!=null && !e._touched) e.value=v; }
@@ -2293,7 +2302,9 @@ async function tick(){
     pushHist();
     drawActiveCharts();
     if(activePage==="settings") renderSettings();
-    applyTranslations();
+    // 仅翻译当前可见页: 中文稳定时 applyTranslations 内部直接短路(零开销);
+    // 英文时也不必每帧扫整棵文档(导航/侧栏为静态, 切语言时已由 applyLang 整体翻译过)。
+    applyTranslations(document.getElementById("page-"+activePage));
   }catch(e){ setStatus("err",t("连接失败: {{e}}","Connection failed: {{e}}",{e:e.message})); }
 }
 function setStatus(type,text){

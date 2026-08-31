@@ -12,6 +12,10 @@
 - **校准 GPU 规格库数值（对齐官方 datasheet）**：上一轮把规格库从 5 张扩到 95 张时，部分数值为近似推算，本轮校准：
   - 数据中心卡 FP32 着色器峰值改用**官方标称值**（H100-SXM-80GB=51.2、H100-PCIe-80GB=48.4、H800-SXM-80GB=51.2、L40S=91.6、L40=90.5 TFLOPS）。`_dc()` 新增 `fp32_override` 参数固定官方值，不再用 `CC×2×boost` 推算（该推算与 Hopper/新架构官方值偏差大）。
   - 修正 **Intel XMX 乘数**：原 `_intel()` 误设 `matrix_mult=2.0`，使 XMX FP16 被高估一倍；改为 `1.0`（Intel XMX FP16 稠密 = 2×FP32，与 NVIDIA Tensor 的 4×FP32 不同）。
+- **前端渲染性能优化（消除每帧全文档翻译冗余）**：原 `tick()` 每次刷新都对**整棵文档**（含导航/侧栏/所有隐藏页）跑一遍 `applyTranslations()` 的 TreeWalker + 属性扫描，是历史记录里标注的渲染瓶颈。本轮：
+  - `applyTranslations()` 新增语言状态守卫 `_appliedLang`：**中文（源语言）且语言自上次完整翻译以来未变时直接短路**，零开销（模板本身已是中文）。仅当语言发生 zh⇄en 切换时才做完整遍历，翻译正确性不受影响。
+  - 每帧 `applyTranslations()` 从「整文档」收窄为「当前可见页」（`page-<activePage>`）；隐藏页在切换时由 `setPage`/`applyLang` 负责整体翻译。英文用户每帧也只翻译正在看的页面，不再扫全树。
+  - 经 jsdom 实跑校验：zh 稳定态 50 次重复翻译恒为无操作且不抛错；zh⇄en 双向切换文案均正确还原。
 - **清除残余的硬编码回退（与原始 bug 同根）**：名称缺失时 `resolve_spec("")` 此前回退到 **RTX 5080 的高性能参数**；现改为全库 FP32 中位数保守估算，并删除 `DEFAULT_SPEC` 常量。新增回归测试锁定，确保不再套用某张具体高端卡。
 - **修复 Windows 指令集探测为空**：原 `_wmi_cpu_detail()` 以 `flags=None` 调用 `_cpu_instruction_sets()` 且无任何真实探测，导致「系统信息」页指令集永远为空；新增 `_wmi_instruction_sets()` 用 `IsProcessorFeaturePresent` 真实探测，并修正架构标签匹配（同时接受 `"x86_64"` 与 `"x86-64"`）。
 - 测试：`tests/test_crossplatform.py` 由 94 项扩至 **120 项**（新增空名称规格回归、系统详情结构、指令集真实探测三组）。
