@@ -86,7 +86,10 @@ def with_fake_procinfo(content, fn):
     def fake_open(path, *a, **kw):
         if str(path) == "/proc/cpuinfo":
             return io.StringIO(content)
-        raise FileNotFoundError(path)
+        # 其余路径(如 psutil 在 Linux 上读取的 /sys/devices/.../core_cpus_list)
+        # 必须回退到真实 open, 否则会误报 FileNotFoundError 导致测试在 Linux 上失败。
+        # 这与下文 with_fake_meminfo 等 mock 的回退写法保持一致。
+        return real_open(path, *a, **kw)
 
     builtins.open = fake_open
     try:
