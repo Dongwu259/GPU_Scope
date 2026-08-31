@@ -107,6 +107,63 @@ def test_history():
         # 裁剪: 超过 retention_days 的应被删除
         h.prune()
         check("History 裁剪生效", len(h.query("30d")) == 1)
+
+        # ---- 降采样归档 (新) ----
+        # 注意: History.add() 固定用 time.time() 打时间戳, 必须用裸 SQL 显式写入历史 ts
+        # 才能构造"跨越多天的旧数据"。下面插入最近 30 天、step=300s 的样本。
+        h2 = gm.History(path + ".ds", interval=5.0, retention_days=30)
+        now = time.time()
+        step = 300
+        span_days = 30
+        n_recent = 0  # 最近 7 天内的样本数(应保留原始)
+        n_old = 0     # 7~30 天前的样本数(应被聚合)
+        total_span = span_days * 86400  # 累计值随时间递增: 越新(ago 越小)累计越大
+        for ago in range(0, span_days * 86400, step):
+            ts = now - ago
+            if ago >= 7 * 86400:
+                n_old += 1
+            else:
+                n_recent += 1
+            h2.conn.execute(
+                "INSERT OR REPLACE INTO samples VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (ts, 100.0 + (ago % 50) * 0.1, 50.0, 70.0,
+                 float(total_span - ago),                          # gpu_e_wh 随时间长增
+                 10.0, 30.0, float((total_span - ago) * 0.5),      # cpu_e_wh
+                 40.0, 130.0,
+                 float((total_span - ago) * 1.5),                  # total_e_wh
+                 float((total_span - ago) * 0.001),               # total_cost
+                 1.0, 2.0, 3.0, 4.0))
+        h2.conn.commit()
+        raw_before = h2.conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
+        h2.downsample()
+        raw_after = h2.conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
+        agg_cnt = h2.conn.execute("SELECT COUNT(*) FROM samples_agg").fetchone()[0]
+        check("降采样后原始表只留最近 full_res_days 天", raw_after <= n_recent + 5)
+        check("降采样后归档表有粗桶(旧数据)", agg_cnt > 100)  # 23 天 * 24 ≈ 552 桶
+        check("降采样确实删除了旧原始行", raw_after < raw_before)
+        # 归档桶数 ≈ (30-7)天 * 24 小时
+        check("归档桶数≈(30-7)天*24", abs(agg_cnt - (23 * 24)) <= 3)
+        # 合并查询: 30d 视图应覆盖到约 retention 起点, 且 ts 单调递增、无重复
+        series = h2.query("30d")
+        ts_list = [r["ts"] for r in series]
+        check("合并查询 ts 单调递增", all(ts_list[i] < ts_list[i + 1] for i in range(len(ts_list) - 1)))
+        check("合并查询覆盖到约 30 天前", ts_list and ts_list[0] <= now - 29 * 86400)
+        # 累计能耗在合并序列中单调不减(桶起点值使相邻桶边界严丝合缝)
+        ewh = [r["total_e_wh"] for r in series]
+        mono = all(ewh[i] <= ewh[i + 1] + 1e-6 for i in range(len(ewh) - 1))
+        check("累计能耗在合并序列中单调不减", mono)
+        # 幂等: 再 downsample 一次不应改变归档桶数 / 原始行数
+        h2.downsample()
+        check("降采样幂等(归档桶数不变)", h2.conn.execute("SELECT COUNT(*) FROM samples_agg").fetchone()[0] == agg_cnt)
+        check("降采样幂等(原始行数不变)", h2.conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0] == raw_after)
+        # 导出全量也应合并两张表
+        all_rows = h2.rows("all")
+        check("rows('all') 合并两张表(>原始仅全分辨率)", len(all_rows) > raw_after)
+        h2.close()
+        try:
+            os.remove(path + ".ds")
+        except Exception:
+            pass
     finally:
         if h is not None:
             try:

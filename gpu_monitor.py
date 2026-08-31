@@ -2855,11 +2855,18 @@ class History:
             "total_pw", "total_e_wh", "total_cost",
             "net_rx_mbs", "net_tx_mbs", "disk_read_mbs", "disk_write_mbs"]
     RANGES = {"1h": 3600, "6h": 21600, "24h": 86400, "7d": 604800, "30d": 2592000}
+    # 降采样: 最近 FULL_RES_DAYS 天保留原始高精度(采样间隔)样本; 更早的数据
+    # 聚合成 AGG_SEC 的粗桶存入 samples_agg, 原始行随后删除以回收空间。
+    # 这样 30 天视图里最近一周仍是 5s 级细节, 更早的退化到小时级, DB 体积极大缩小。
+    FULL_RES_DAYS = 7
+    AGG_SEC = 3600
 
     def __init__(self, path, interval=5.0, retention_days=30):
         self.path = path
         self.interval = interval
         self.retention_days = retention_days
+        self.full_res_days = self.FULL_RES_DAYS
+        self.agg_sec = self.AGG_SEC
         # 写入线程与 HTTP 查询线程会并发使用同一个连接: check_same_thread=False
         # 允许跨线程, 但必须自己加锁, 否则写事务(prune)与读(query)并发可能抛
         # "database is locked", 被 except 吞掉后表现为历史图表偶发空白。
@@ -2880,6 +2887,14 @@ class History:
         self.conn.commit()
         # 兼容旧库 (运行过早期版本, 仅 12 列): 缺失的网络/磁盘列用 ALTER 补齐
         self._migrate()
+        # 降采样归档表: 与 samples 同列, ts 为桶起点(对齐到 AGG_SEC), 主键便于 REPLACE
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS samples_agg("
+            "ts REAL PRIMARY KEY, gpu_pw REAL, gpu_util REAL, gpu_temp REAL, gpu_e_wh REAL,"
+            " cpu_util REAL, cpu_pw REAL, cpu_e_wh REAL, mem_pct REAL, total_pw REAL,"
+            " total_e_wh REAL, total_cost REAL, net_rx_mbs REAL, net_tx_mbs REAL,"
+            " disk_read_mbs REAL, disk_write_mbs REAL)")
+        self.conn.commit()
 
     def _migrate(self):
         with self.lock:
@@ -2907,8 +2922,62 @@ class History:
             except Exception:
                 pass
 
+    def downsample(self):
+        """把超过全分辨率窗口的旧样本聚合成粗桶, 并删除原始高精度行以回收空间。
+
+        设计:
+        - 保留最近 full_res_days 天的原始样本(采样间隔级细节);
+        - 更早(但在保留期内)的数据按 AGG_SEC 分桶聚合, 写入 samples_agg:
+          * 速率类指标(gpu_pw/util/temp, cpu_*, mem_pct, total_pw, 网络/磁盘速率)取 AVG;
+          * 累计类指标(gpu_e_wh, cpu_e_wh, total_e_wh, total_cost 单调递增)取
+            **桶起点值**(该桶内 ts 最小的样本值), 使相邻桶在边界上严丝合缝地衔接,
+            合并后累计曲线全局单调不减。若用桶末尾值(或 MAX), 相邻桶边界处可能出现
+            回退(桶内能量曾短暂回落), 破坏单调性。
+        - 聚合后删除 samples 中 ts < cutoff 的原始行。
+        幂等: 重复调用安全(INSERT OR REPLACE + 已删的行不会再被聚合)。
+        若保留期 <= 全分辨率窗口, 全部保留原始即可, 直接返回。
+        """
+        if self.retention_days <= self.full_res_days:
+            return
+        with self.lock:
+            try:
+                cutoff = time.time() - self.full_res_days * 86400.0
+                ret_cut = time.time() - self.retention_days * 86400.0
+                # 两层级子查询:
+                #  内层: 按 bkt=对齐到 AGG_SEC 的桶聚合。速率列取 AVG; 同时记录桶内
+                #        最小 ts(min_ts)——即该桶"起点"那一行的时刻。
+                #  外层: 累计类列(gpu_e_wh/cpu_e_wh/total_e_wh/total_cost 单调递增)取
+                #        min_ts 那一行的值(桶起点值), 使其与后续桶在边界处严丝合缝地衔接,
+                #        合并后累计曲线全局单调不减。若取桶末尾值(或 AVG)则相邻桶边界
+                #        处可能出现回退, 破坏单调性。
+                _cum = {"gpu_e_wh", "cpu_e_wh", "total_e_wh", "total_cost"}
+                sel_cols = []
+                inner_avg = []
+                for c in self.COLS[1:]:
+                    if c in _cum:
+                        # 外层: 用相关子查询取桶起点(min_ts)行的累计值
+                        sel_cols.append(
+                            "(SELECT %s FROM samples s2 WHERE s2.ts = x.min_ts) AS %s" % (c, c))
+                    else:
+                        sel_cols.append("x.%s AS %s" % (c, c))
+                        inner_avg.append("AVG(%s) AS %s" % (c, c))
+                outer_sel = "bkt AS ts," + ",".join(sel_cols)
+                inner_sel = ("CAST(samples.ts/? AS INTEGER)*? AS bkt,"
+                             "MIN(samples.ts) AS min_ts," + ",".join(inner_avg))
+                sql = ("INSERT OR REPLACE INTO samples_agg(ts," + ",".join(self.COLS[1:]) + ") "
+                       "SELECT " + outer_sel + " FROM ("
+                       "SELECT " + inner_sel + " FROM samples "
+                       "WHERE ts>=? AND ts<? GROUP BY bkt) x")
+                # 参数顺序: 内层 bkt 用 2 个 agg_sec, 过滤用 ret_cut, cutoff (共 4 个)
+                self.conn.execute(sql, (self.agg_sec, self.agg_sec, ret_cut, cutoff))
+                # 回收原始高精度样本(仅保留最近 full_res_days 天)
+                self.conn.execute("DELETE FROM samples WHERE ts < ?", (cutoff,))
+                self.conn.commit()
+            except Exception:
+                pass
+
     def prune(self):
-        """删除超过保留期的样本。
+        """删除超过保留期的样本(原始表与归档表都清)。
 
         调用方应控制频率 (目前每小时一次) —— 这是对整表的扫描式 DELETE,
         每次采样都跑一遍会在历史库变大后造成明显的无谓 IO。
@@ -2917,6 +2986,7 @@ class History:
             try:
                 cutoff = time.time() - self.retention_days * 86400.0
                 self.conn.execute("DELETE FROM samples WHERE ts < ?", (cutoff,))
+                self.conn.execute("DELETE FROM samples_agg WHERE ts < ?", (cutoff,))
                 self.conn.commit()
             except Exception:
                 pass
@@ -2926,6 +2996,7 @@ class History:
         with self.lock:
             try:
                 self.conn.execute("DELETE FROM samples")
+                self.conn.execute("DELETE FROM samples_agg")
                 self.conn.commit()
                 try:
                     self.conn.execute("VACUUM")
@@ -2935,20 +3006,32 @@ class History:
             except Exception:
                 return False
 
+    def _merged_rows(self, start):
+        """合并"最近全分辨率样本 + 更早的降采样归档", 按时间升序返回。
+
+        samples 只保留最近 full_res_days 天的原始行; samples_agg 持有更早的粗桶。
+        两者时间不重叠, 直接拼接后排序即可。downsample 尚未运行时 samples 仍含
+        全部历史、agg 为空, 此时仅从 samples 取, 行为等价旧逻辑(无重复/无遗漏)。
+        """
+        cutoff = time.time() - self.full_res_days * 86400.0
+        cols = ",".join(self.COLS)
+        with self.lock:
+            try:
+                recent = self.conn.execute(
+                    "SELECT %s FROM samples WHERE ts>=? ORDER BY ts ASC" % cols, (start,)).fetchall()
+                older = self.conn.execute(
+                    "SELECT %s FROM samples_agg WHERE ts>=? AND ts<? ORDER BY ts ASC" % cols,
+                    (start, cutoff)).fetchall()
+            except Exception:
+                return []
+        merged = recent + older
+        merged.sort(key=lambda r: r[0])
+        return merged
+
     def query(self, range_key="24h"):
         secs = self.RANGES.get(range_key, 86400)
         start = time.time() - secs
-        with self.lock:
-            try:
-                cur = self.conn.execute(
-                    "SELECT ts,gpu_pw,gpu_util,gpu_temp,gpu_e_wh,cpu_util,cpu_pw,cpu_e_wh,"
-                    "mem_pct,total_pw,total_e_wh,total_cost,"
-                    "net_rx_mbs,net_tx_mbs,disk_read_mbs,disk_write_mbs "
-                    "FROM samples WHERE ts>=? ORDER BY ts ASC",
-                    (start,))
-                rows = cur.fetchall()
-            except Exception:
-                rows = []
+        rows = self._merged_rows(start)
         if len(rows) > 720:
             step = len(rows) // 720
             rows = rows[::step]
@@ -2962,17 +3045,7 @@ class History:
         else:
             secs = self.RANGES.get(range_key, 86400)
             start = time.time() - secs
-        with self.lock:
-            try:
-                cur = self.conn.execute(
-                    "SELECT ts,gpu_pw,gpu_util,gpu_temp,gpu_e_wh,cpu_util,cpu_pw,cpu_e_wh,"
-                    "mem_pct,total_pw,total_e_wh,total_cost,"
-                    "net_rx_mbs,net_tx_mbs,disk_read_mbs,disk_write_mbs "
-                    "FROM samples WHERE ts>=? ORDER BY ts ASC",
-                    (start,))
-                return cur.fetchall()
-            except Exception:
-                return []
+        return self._merged_rows(start)
 
     def export_csv(self, range_key="24h"):
         rows = self.rows(range_key)
@@ -3780,10 +3853,16 @@ def main():
                             nrx, ntx, dr, dw)
                 if time.monotonic() - _last_prune > 3600:
                     history.prune()
+                    history.downsample()
                     _last_prune = time.monotonic()
             except Exception:
                 pass
     threading.Thread(target=_history_writer, daemon=True).start()
+    # 启动即做一次降采样归档, 让已存在的历史库立即受益(不必等首个整点)
+    try:
+        history.downsample()
+    except Exception:
+        pass
 
     print(f"> 监控面板已启动: {url}")
     print("> 按 Ctrl+C 退出 (后台模式请用 stop 脚本)。")

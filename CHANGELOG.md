@@ -16,6 +16,11 @@
   - `applyTranslations()` 新增语言状态守卫 `_appliedLang`：**中文（源语言）且语言自上次完整翻译以来未变时直接短路**，零开销（模板本身已是中文）。仅当语言发生 zh⇄en 切换时才做完整遍历，翻译正确性不受影响。
   - 每帧 `applyTranslations()` 从「整文档」收窄为「当前可见页」（`page-<activePage>`）；隐藏页在切换时由 `setPage`/`applyLang` 负责整体翻译。英文用户每帧也只翻译正在看的页面，不再扫全树。
   - 经 jsdom 实跑校验：zh 稳定态 50 次重复翻译恒为无操作且不抛错；zh⇄en 双向切换文案均正确还原。
+- **历史库降采样归档（控制 30 天视图的 DB 体积）**：此前 `history.db` 对全部 30 天都保留采样间隔级（5s）原始样本，长期运行体积膨胀明显且无可降采样归档。新增 `samples_agg` 归档表与 `History.downsample()`：
+  - 最近 `FULL_RES_DAYS=7` 天保留原始高精度样本（30 天视图里最近一周仍是 5s 级细节）；更早（仍在保留期内）的数据按 `AGG_SEC=3600` 分桶聚合入 `samples_agg`，原始行随后删除以回收空间。
+  - **速率类指标**（功率/利用率/温度/内存占用/网络磁盘速率）取桶内 `AVG`；**累计类指标**（gpu_e_wh/cpu_e_wh/total_e_wh/total_cost，单调递增）取**桶起点值**（桶内 ts 最小的样本），使相邻桶在边界处严丝合缝衔接，合并后累计曲线全局单调不减（若取桶末尾值或均值，相邻桶边界会出现回退，破坏单调性）。
+  - `query()` / `rows()` 经新增的 `_merged_rows()` 合并两张表（recent 全分辨率 + older 粗桶），按 ts 升序返回，前端视图无感知；`prune()` / `clear()` 同步覆盖归档表。固定每小时与启动时各调用一次，幂等（`INSERT OR REPLACE` + 已删行不再被聚合）。
+  - 测试：`tests/test_core.py::test_history` 新增 10 项降采样断言（原始行回收、归档桶数 ≈(30-7)×24、合并序列 ts 单调无重复、累计能耗单调不减、幂等），全部通过。
 - **清除残余的硬编码回退（与原始 bug 同根）**：名称缺失时 `resolve_spec("")` 此前回退到 **RTX 5080 的高性能参数**；现改为全库 FP32 中位数保守估算，并删除 `DEFAULT_SPEC` 常量。新增回归测试锁定，确保不再套用某张具体高端卡。
 - **修复 Windows 指令集探测为空**：原 `_wmi_cpu_detail()` 以 `flags=None` 调用 `_cpu_instruction_sets()` 且无任何真实探测，导致「系统信息」页指令集永远为空；新增 `_wmi_instruction_sets()` 用 `IsProcessorFeaturePresent` 真实探测，并修正架构标签匹配（同时接受 `"x86_64"` 与 `"x86-64"`）。
 - 测试：`tests/test_crossplatform.py` 由 94 项扩至 **120 项**（新增空名称规格回归、系统详情结构、指令集真实探测三组）。
