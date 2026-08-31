@@ -25,6 +25,12 @@
 - **修复 Windows 指令集探测为空**：原 `_wmi_cpu_detail()` 以 `flags=None` 调用 `_cpu_instruction_sets()` 且无任何真实探测，导致「系统信息」页指令集永远为空；新增 `_wmi_instruction_sets()` 用 `IsProcessorFeaturePresent` 真实探测，并修正架构标签匹配（同时接受 `"x86_64"` 与 `"x86-64"`）。
 - 测试：`tests/test_crossplatform.py` 由 94 项扩至 **120 项**（新增空名称规格回归、系统详情结构、指令集真实探测三组）。
 
+## 0.1.7 续 — 性能与体验三项增强（ctypes PDH / 手动归档 / 体积验证）
+
+- **每进程显存改为 ctypes 直调 PDH（零子进程）**：此前每 ~5s 用 PowerShell `Get-Counter` 子进程读取「GPU Process Memory」计数器，是 Windows 上最主要的子进程开销。现用 `ctypes` 直调 `pdh.dll`（`PdhEnumObjectItemsW` 枚举实例 → `PdhAddCounterW` → `PdhCollectQueryData` → `PdhGetFormattedCounterValue`，仅取 `phys_0` 本地/专用显存，字节转 MB），彻底消除该子进程。保留 5s TTL 缓存与「只跳过一轮」降级逻辑（空闲机器基本不查询）。非 Windows 直接返回空，行为不变。逻辑核心 `_parse_pdh_proc_mem` 抽成纯函数便于单测（伪造实例名+原始值即可验证）。
+- **设置页新增「立即归档（降采样）」按钮**：后端新增 `POST /api/history/downsample`（走既有 CSRF Origin 校验），手动触发 `History.downsample()`；顺带 `VACUUM` 立即回收 `DELETE` 释放的空闲页（hourly 自动归档不 vacuum，以免频繁持写锁）。返回 `raw_before/raw_after/agg_buckets/size_before/size_after` 供前端提示。前端在数据管理卡片加按钮 + 状态行（显示归档前后行数/桶数）。测试：新增 `test_pdh_proc_mem` / `test_history_stats` / `test_history_downsample_endpoint`（直接驱动 `Handler.do_POST` 的该分支，不启真实 socket）。
+- **降采样体积验证（模拟 30 天长跑）**：`.workbuddy/verify_downsample_size.py` 用合成数据填充 30 天、5s 间隔（518,400 行），测得降采样后行数缩减 **76.7%**、文件体积（降采样+VACUUM）缩减 **78.9%**（48.0 MB → 10.1 MB）。重要结论：**hourly 自动归档只 `DELETE` 不 `VACUUM`，文件不会立即变小，而是停在稳态体积不再无限增长；手动「立即归档」按钮的 VACUUM 才立即回填空闲页**。已生成 `.workbuddy/downsample_validation.html` 离线可视化（纯 SVG/CSS 柱状对比）。
+
 ## 0.1.6 — 审查修复（P0 缺陷 + 文档可信度）
 
 - **修复 Windows 开机自启完全失效（P0）**：原实现把 `start_gpu_monitor.bat` 复制到启动文件夹，但源脚本用 `%~dp0` 定位自身目录，副本会 `cd` 到**启动文件夹**再去找 `gpu_monitor.py`，必然失败；而设置页因只检测文件存在仍显示"已开启"，属静默失效。现改为**生成写死项目绝对路径的启动器**（主服务 + watchdog），并用系统 ANSI 编码写入以兼容含非 ASCII 的项目路径。

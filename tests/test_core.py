@@ -186,12 +186,130 @@ def test_helpers():
     check("decode_throttle 多原因数量", len(multi) == 2)
 
 
+# ---------------------------------------------------------------------------
+# 5. 每进程显存 (PDH) —— ctypes 直调, 纯解析函数可单测
+# ---------------------------------------------------------------------------
+def test_pdh_proc_mem():
+    # _parse_pdh_proc_mem: [(实例名, 字节)] -> {pid: MB}, 仅取 phys_0
+    pairs = [
+        ("pid_4020_luid_0x00000000_0x000010ec_phys_0", 1073741824.0),  # 1 GiB -> 1024.0 MB
+        ("pid_7777_luid_0x1_phys_0", 2147483648.0),                    # 2 GiB -> 2048.0 MB
+        ("pid_9999_luid_0x1_phys_1", 524288000.0),                     # phys_1 应被忽略
+        ("garbage_instance", 123.0),                                  # 非匹配应被忽略
+    ]
+    out = gm._parse_pdh_proc_mem(pairs)
+    check("PDH 解析 pid=4020 -> 1024.0 MB", abs(out.get(4020, -1) - 1024.0) < 0.05)
+    check("PDH 解析 pid=7777 -> 2048.0 MB", abs(out.get(7777, -1) - 2048.0) < 0.05)
+    check("PDH 忽略 phys_1 实例", 9999 not in out)
+    check("PDH 仅返回 phys_0 两个实例", len(out) == 2)
+    # 非 Windows 上 _pdh_local_usage_pairs 直接返回 [] -> 查询返回 {}
+    if not getattr(gm, "IS_WINDOWS", False):
+        check("PDH 非 Windows 查询返回空", gm._query_pdh_proc_mem() == {})
+    # 模拟 Windows: 给 _pdh_local_usage_pairs 打桩, 验证集成解析
+    orig = gm._pdh_local_usage_pairs
+    try:
+        gm._pdh_local_usage_pairs = lambda: [("pid_1234_luid_0x5_phys_0", 536870912.0)]
+        res = gm._query_pdh_proc_mem()
+        check("PDH 集成(伪造 pairs) pid=1234 -> 512.0 MB", abs(res.get(1234, -1) - 512.0) < 0.05)
+    finally:
+        gm._pdh_local_usage_pairs = orig
+
+
+# ---------------------------------------------------------------------------
+# 6. History.stats() 与降采样手动触发端点
+# ---------------------------------------------------------------------------
+def test_history_stats():
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    try:
+        h = gm.History(path, interval=5.0, retention_days=30)
+        s0 = h.stats()
+        check("stats 初始 raw=0", s0["raw"] == 0)
+        check("stats 初始 agg=0", s0["agg"] == 0)
+        for i in range(5):
+            h.conn.execute(
+                "INSERT OR REPLACE INTO samples VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (time.time() - i, 100.0, 50.0, 70.0, float(i), 10.0, 30.0, float(i),
+                 40.0, 130.0, float(i), 0.001, 1.0, 2.0, 3.0, 4.0))
+        h.conn.commit()
+        s1 = h.stats()
+        check("stats 写入 5 行后 raw=5", s1["raw"] == 5)
+        h.close()
+    finally:
+        os.remove(path)
+
+
+def test_history_downsample_endpoint():
+    """直接驱动 Handler.do_POST 的 /api/history/downsample 分支(不启真实 socket)。"""
+    import json as _json
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    saved_hist = getattr(gm.Handler, "history", None)
+    saved_meter = getattr(gm.Handler, "meter", None)
+    saved_token = getattr(gm.Handler, "auth_token", None)
+    try:
+        h = gm.History(path, interval=5.0, retention_days=30)
+        now = time.time()
+        step = 300
+        span = 30 * 86400
+        with h.lock:
+            for ago in range(0, span, step):
+                h.conn.execute(
+                    "INSERT OR REPLACE INTO samples VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (now - ago, 100.0, 50.0, 70.0, float(span - ago), 10.0, 30.0,
+                     float((span - ago) * 0.5), 40.0, 130.0, float((span - ago) * 1.5),
+                     0.001, 1.0, 2.0, 3.0, 4.0))
+        h.conn.commit()
+        gm.Handler.history = h
+        gm.Handler.meter = None
+        gm.Handler.auth_token = ""
+
+        captured = {}
+
+        class _H:
+            @staticmethod
+            def get(k, d=None):
+                return None
+
+        class _R:
+            @staticmethod
+            def read(n):
+                return b""
+
+        class _Req:
+            path = "/api/history/downsample"
+            client_address = ("127.0.0.1", 1234)
+            headers = _H()
+            rfile = _R()
+
+            def _send(self, code, body, content_type="application/json", extra_headers=None):
+                captured["code"] = code
+                captured["body"] = body
+
+        gm.Handler.do_POST(_Req())
+        check("降采样端点返回 200", captured.get("code") == 200)
+        if captured.get("code") == 200:
+            payload = _json.loads(captured["body"])
+            check("降采样端点 ok=true", payload.get("ok") is True)
+            check("降采样端点 raw_after < raw_before", payload["raw_after"] < payload["raw_before"])
+            check("降采样端点生成归档桶", payload["agg_buckets"] > 0)
+        h.close()
+    finally:
+        gm.Handler.history = saved_hist
+        gm.Handler.meter = saved_meter
+        gm.Handler.auth_token = saved_token
+        os.remove(path)
+
+
 if __name__ == "__main__":
     print("== GPU Monitor 基础测试 ==")
     test_meter()
     test_meter_persist()
     test_history()
     test_helpers()
+    test_pdh_proc_mem()
+    test_history_stats()
+    test_history_downsample_endpoint()
     print("=======================")
     if FAILS:
         print(f"失败 {len(FAILS)} 项: {FAILS}")

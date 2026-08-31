@@ -891,6 +891,11 @@
           <button id="btnResetAll" class="btn danger">清除全部历史</button>
         </div>
         <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-top:14px">
+          <button id="btnDownsample" class="btn">立即归档（降采样）</button>
+          <span id="dsState" class="note" style="margin:0"></span>
+        </div>
+        <div class="note" style="margin-top:10px">归档：最近 7 天保留 5 秒级原始样本，更早的历史按 1 小时聚合（功率/利用率取均值、累计能耗取桶起点值），可大幅缩小 history.db 体积。系统默认每小时自动执行一次。</div>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-top:14px">
           <div>
             <div class="label"><span>导出格式</span></div>
             <select id="expFormat" class="input">
@@ -2273,6 +2278,22 @@ document.getElementById("btnExport").addEventListener("click",function(){
   a.href=url; a.rel="noopener";
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(()=>{ st.textContent=t("已触发下载（请查看浏览器下载栏）","Download triggered (check your browser's download bar)"); }, 600);
+});
+document.getElementById("btnDownsample").addEventListener("click",async()=>{
+  const st=document.getElementById("dsState");
+  const btn=document.getElementById("btnDownsample");
+  btn.disabled=true; st.textContent=t("正在归档…","Archiving…"); st.style.color="var(--green)";
+  try{
+    const r=await postJSON("/api/history/downsample",{});
+    if(r&&r.ok){
+      st.textContent=t("已归档：原始行 "+r.raw_before+" → "+r.raw_after+"，归档桶 "+r.agg_buckets,
+                        "Archived: raw rows "+r.raw_before+" → "+r.raw_after+", agg buckets "+r.agg_buckets);
+      st.style.color="var(--green)";
+    } else {
+      st.textContent=t("归档失败","Archive failed"); st.style.color="var(--red)";
+    }
+  }catch(e){ st.textContent=t("归档失败：{{e}}","Archive failed: {{e}}",{e:e.message}); st.style.color="var(--red)"; }
+  finally{ btn.disabled=false; }
 });
 
 /* ---------------- 主循环 ---------------- */

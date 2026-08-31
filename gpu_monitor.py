@@ -568,41 +568,148 @@ def _proc_name(pid):
 
 # ---------------------------------------------------------------------------
 # 每进程显存 (Windows 性能计数器 PDH) —— NVML 在 WDDM 下不提供, 这里补齐
-# 实例名形如 pid_4020_luid_0x..._phys_0 , phys_0 = 本地(专用)显存, 单位 KB
+# 实例名形如 pid_4020_luid_0x..._phys_0 , phys_0 = 本地(专用)显存。
+# 计数器 "Local Usage" 单位为字节(bytes), 下面换算成 MB。
+# 原先用 PowerShell Get-Counter 子进程读取(每 ~5s spawn 一次, 是 Windows 上
+# 最主要子进程开销); 现改为 ctypes 直调 pdh.dll, 零子进程。
 # ---------------------------------------------------------------------------
-_PDH_SCRIPT = (
-    "$e=Get-Counter -Counter '\\GPU Process Memory(*)\\Local Usage' "
-    "-ErrorAction SilentlyContinue; "
-    "if($e){$e.CounterSamples | ForEach-Object { "
-    "if($_.InstanceName -match 'pid_(\\d+)_luid_.*_phys_0$'){ "
-    "'{0}={1}' -f $Matches[1], [math]::Round($_.CookedValue/1MB,1) } }}"
-)
+_PROC_MEM_RE = re.compile(r'pid_(\d+)_luid_.*_phys_0$')
+_PROC_MEM_OBJECT = "GPU Process Memory"
+_PROC_MEM_COUNTER = "Local Usage"
 
-# PDH 查询缓存: 每进程显存变化缓慢, 没必要跟着 0.5s 的采样间隔反复 spawn PowerShell
+# PDH 查询缓存: 每进程显存变化缓慢, 没必要跟着 0.5s 的采样间隔反复查询
 PROC_MEM_TTL = 5.0
 _PROC_MEM_CACHE = {}
 _PROC_MEM_CACHE_TS = 0.0
 _PROC_MEM_SKIP_NEXT = False
 
 
+def _parse_pdh_proc_mem(instance_values):
+    """把 [(实例名, 原始字节数), ...] 解析成 {pid: 专用显存_MB}。
+
+    纯函数, 不触碰 PDH / 系统, 便于单测(喂伪造的实例名+原始值即可)。
+    逻辑与旧 PowerShell 脚本一致: 仅取 phys_0(本地/专用显存)实例,
+    字节数 / 1MB 取 1 位小数。
+    """
+    out = {}
+    for name, raw in instance_values:
+        m = _PROC_MEM_RE.match(name or "")
+        if not m:
+            continue
+        try:
+            pid = int(m.group(1))
+            mb = round(float(raw) / 1048576.0, 1)
+            out[pid] = mb
+        except Exception:
+            pass
+    return out
+
+
+def _pdh_local_usage_pairs():
+    """ctypes 直调 pdh.dll 枚举 GPU Process Memory 实例并读取 Local Usage(字节)。
+
+    返回 [(实例名, 原始字节数), ...]。任何异常都返回 [] (由上层缓存层决定降级)。
+    仅 Windows 调用; 非 Windows 直接返回 []。
+    """
+    if not IS_WINDOWS:
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+        pdh = ctypes.windll.pdh
+    except Exception:
+        return []
+    try:
+        PDH_FMT_DOUBLE = 0x00000200
+        PERF_DETAIL_WIZARD = 0x00000003
+        # PDH_CSTATUS_VALID_DATA=0 / PDH_CSTATUS_NEW_DATA=0x01030001
+        _VALID = (0, 0x01030001)
+
+        class _ValUnion(ctypes.Union):
+            _fields_ = [("longValue", ctypes.c_long),
+                        ("doubleValue", ctypes.c_double),
+                        ("largeValue", ctypes.c_longlong),
+                        ("astringValue", ctypes.c_char_p),
+                        ("wstringValue", ctypes.c_wchar_p)]
+
+        class PDH_FMT_COUNTERVALUE(ctypes.Structure):
+            _fields_ = [("CStatus", wintypes.DWORD), ("u", _ValUnion)]
+
+        pdh.PdhOpenQueryW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+        pdh.PdhOpenQueryW.restype = wintypes.DWORD
+        pdh.PdhEnumObjectItemsW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR,
+                                            wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD),
+                                            wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD), wintypes.DWORD]
+        pdh.PdhEnumObjectItemsW.restype = wintypes.DWORD
+        pdh.PdhAddCounterW.argtypes = [wintypes.HANDLE, wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+        pdh.PdhAddCounterW.restype = wintypes.DWORD
+        pdh.PdhCollectQueryData.argtypes = [wintypes.HANDLE]
+        pdh.PdhCollectQueryData.restype = wintypes.DWORD
+        pdh.PdhGetFormattedCounterValue.argtypes = [wintypes.HANDLE, wintypes.DWORD,
+                                                     ctypes.POINTER(wintypes.DWORD),
+                                                     ctypes.POINTER(PDH_FMT_COUNTERVALUE)]
+        pdh.PdhGetFormattedCounterValue.restype = wintypes.DWORD
+        pdh.PdhCloseQuery.argtypes = [wintypes.HANDLE]
+        pdh.PdhCloseQuery.restype = wintypes.DWORD
+
+        cbC = wintypes.DWORD(0)
+        cbI = wintypes.DWORD(0)
+        # 第一次调用拿缓冲区尺寸(实例名多字符串以 \\0\\0 结尾)
+        pdh.PdhEnumObjectItemsW(None, None, _PROC_MEM_OBJECT, None, ctypes.byref(cbC),
+                                None, ctypes.byref(cbI), PERF_DETAIL_WIZARD)
+        if cbI.value < 2:
+            return []
+        ibuf = ctypes.create_unicode_buffer(cbI.value)
+        cbuf = ctypes.create_unicode_buffer(cbC.value)
+        if pdh.PdhEnumObjectItemsW(None, None, _PROC_MEM_OBJECT, cbuf, ctypes.byref(cbC),
+                                    ibuf, ctypes.byref(cbI), PERF_DETAIL_WIZARD) != 0:
+            return []
+        # 解析多字符串(双 \\0 结尾)
+        instances = []
+        cur = []
+        for i in range(cbI.value):
+            ch = ibuf[i]
+            if ch == "\x00":
+                if cur:
+                    instances.append("".join(cur))
+                    cur = []
+                else:
+                    break
+            else:
+                cur.append(ch)
+        if not instances:
+            return []
+        hQuery = wintypes.HANDLE()
+        if pdh.PdhOpenQueryW(None, 0, ctypes.byref(hQuery)) != 0:
+            return []
+        try:
+            counters = []  # (实例名, hCounter)
+            for name in instances:
+                path = "\\%s(%s)\\%s" % (_PROC_MEM_OBJECT, name, _PROC_MEM_COUNTER)
+                hC = wintypes.HANDLE()
+                if pdh.PdhAddCounterW(hQuery, path, 0, ctypes.byref(hC)) == 0:
+                    counters.append((name, hC))
+            if not counters:
+                return []
+            pdh.PdhCollectQueryData(hQuery)
+            pairs = []
+            ctype = wintypes.DWORD(0)
+            val = PDH_FMT_COUNTERVALUE()
+            for name, hC in counters:
+                if pdh.PdhGetFormattedCounterValue(hC, PDH_FMT_DOUBLE, ctypes.byref(ctype), ctypes.byref(val)) == 0:
+                    if val.CStatus in _VALID:
+                        pairs.append((name, val.u.doubleValue))
+            return pairs
+        finally:
+            pdh.PdhCloseQuery(hQuery)
+    except Exception:
+        return []
+
+
 def _query_pdh_proc_mem():
     out = {}
-    if not IS_WINDOWS:
-        # 非 Windows 无 PDH 性能计数器; 每进程显存由 NVML 进程 API 提供
-        return out
     try:
-        r = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", _PDH_SCRIPT],
-            capture_output=True, text=True, timeout=8,
-            creationflags=CREATE_NO_WINDOW,
-        )
-        for line in r.stdout.splitlines():
-            if "=" in line:
-                pid_s, mb_s = line.strip().split("=", 1)
-                try:
-                    out[int(pid_s)] = float(mb_s)
-                except Exception:
-                    pass
+        out = _parse_pdh_proc_mem(_pdh_local_usage_pairs())
     except Exception:
         pass
     return out
@@ -611,8 +718,8 @@ def _query_pdh_proc_mem():
 def _query_pdh_proc_mem_cached():
     """每进程显存的带缓存查询。返回 (结果 dict, 本轮是否真的查询过)。
 
-    每 2 秒 spawn 一个 PowerShell 去读 PDH 计数器, 是本项目在 Windows 上最主要的
-    子进程开销 —— 而 PDH 的用途只是给"GPU 进程列表"补一列专用显存, 变化很慢。
+    每 ~5s 用 ctypes 直调 pdh.dll 读一次 PDH 计数器(零子进程), 是本项目在 Windows 上
+    最轻量的系统调用之一 —— 而 PDH 的用途只是给"GPU 进程列表"补一列专用显存, 变化很慢。
     这里做两件事:
       1. 缓存 PROC_MEM_TTL 秒, 采样间隔(默认 0.5s)远小于它时不再重复 spawn;
       2. 上一轮查到"没有任何进程占用 GPU"时, 跳过下一轮查询 —— 空闲机器(监控
@@ -2976,6 +3083,21 @@ class History:
             except Exception:
                 pass
 
+    def stats(self):
+        """返回当前历史库规模(在锁内读取, 避免与写入线程竞争)。"""
+        with self.lock:
+            try:
+                raw = self.conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
+                agg = self.conn.execute("SELECT COUNT(*) FROM samples_agg").fetchone()[0]
+                size = -1
+                try:
+                    size = os.path.getsize(self.path)
+                except Exception:
+                    pass
+                return {"raw": raw, "agg": agg, "size_bytes": size}
+            except Exception:
+                return {"raw": -1, "agg": -1, "size_bytes": -1}
+
     def prune(self):
         """删除超过保留期的样本(原始表与归档表都清)。
 
@@ -3346,6 +3468,28 @@ class Handler(BaseHTTPRequestHandler):
                 cleared = False
             _errlog("reset_all: meter cleared, history cleared=%s" % cleared)
             self._send(200, json.dumps({"ok": True, "history_cleared": cleared}))
+            return
+        if Handler.history is not None and path == "/api/history/downsample":
+            # 手动触发历史库降采样归档: 默认每小时 + 启动时各跑一次, 这里给
+            # 设置页一个"立即归档"入口, 让存量历史库马上受益, 不必等下一个整点。
+            # 手动归档顺带 VACUUM, 立即回收 DELETE 释放的空闲页(自动归档不 vacuum,
+            # 以免每小时频繁持写锁); 这样点一次按钮 history.db 体积立刻回落。
+            try:
+                before = Handler.history.stats()
+                Handler.history.downsample()
+                try:
+                    Handler.history.conn.execute("VACUUM")
+                except Exception:
+                    pass
+                after = Handler.history.stats()
+                self._send(200, json.dumps({
+                    "ok": True,
+                    "raw_before": before["raw"], "raw_after": after["raw"],
+                    "agg_buckets": after["agg"],
+                    "size_before": before["size_bytes"], "size_after": after["size_bytes"],
+                }))
+            except Exception as e:
+                self._send(500, json.dumps({"error": str(e)}))
             return
         if path == "/api/settings/prefs":
             try:
